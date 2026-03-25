@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多模态文档问答助手</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- 侧边栏 -->
+        <aside id="sidebar">
+            <h2>📎 知识库</h2>
+            <div id="file-list">
+                <p class="empty-hint">暂无文件，请上传知识文档</p>
+            </div>
+        </aside>
+
+        <!-- 主区域 -->
+        <main id="main">
+            <!-- 顶栏 -->
+            <header id="header">
+                <h1>多模态文档问答助手</h1>
+                <div id="header-actions">
+                    <span id="status-indicator" class="status-ready">● 就绪</span>
+                </div>
+            </header>
+
+            <!-- 消息区域 -->
+            <div id="chat-messages">
+                <div class="message welcome">
+                    <div class="message-content">
+                        <p>👋 你好！我是多模态文档问答助手。</p>
+                        <p>你可以：</p>
+                        <ul>
+                            <li>📤 上传 <strong>PDF / 图片 / 文本</strong> 文件到知识库</li>
+                            <li>💬 基于已上传的知识进行问答</li>
+                            <li>🖼️ 直接发送图片进行即时问答</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 图片预览（发送前） -->
+            <div id="image-preview" class="hidden">
+                <img id="preview-img" src="" alt="预览">
+                <button id="clear-image" title="移除图片">✕</button>
+            </div>
+
+            <!-- 输入区域 -->
+            <div id="input-area">
+                <div id="input-actions">
+                    <button id="btn-upload" title="上传文件">📎</button>
+                    <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.txt,.md" hidden multiple>
+                    <button id="btn-image" title="发送图片问答">🖼️</button>
+                    <input type="file" id="image-input" accept=".png,.jpg,.jpeg" hidden>
+                </div>
+                <textarea id="message-input" placeholder="输入你的问题…" rows="1"></textarea>
+                <button id="btn-send" title="发送">➤</button>
+            </div>
+        </main>
+    </div>
+
+    <!-- 上传进度模态框 -->
+    <div id="upload-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3>📤 文件处理中</h3>
+            <div id="upload-progress">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+                <p id="upload-status-text">准备中...</p>
+            </div>
+            <button id="btn-close-modal" class="hidden">关闭</button>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
