@@ -11,10 +11,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router as chat_router, set_rag_service
 from app.api.ingest import router as ingest_router, set_vector_store
+from app.agent import build_agent_graph
+from app.api.agent import router as agent_router, set_agent_graph, set_checkpointer
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.repositories.vector_store import FAISSVectorStore
 from app.services.rag_service import RAGService
+from app.services.retrieval_service import RetrievalService
+from app.services.web_search_service import WebSearchService
 
 logger = setup_logger("main")
 settings = get_settings()
@@ -30,7 +34,7 @@ async def lifespan(app: FastAPI):
     global _store, _rag
 
     logger.info("=" * 50)
-    logger.info("多模态文档问答助手 V1 启动中...")
+    logger.info("多模态文档问答助手 V2 启动中... (LangGraph checkpointer)")
     logger.info("=" * 50)
 
     # 初始化向量存储
@@ -49,6 +53,35 @@ async def lifespan(app: FastAPI):
     set_vector_store(_store)
     set_rag_service(_rag)
 
+    # ---- 初始化 Agent 模块 ----
+    logger.info("初始化 Agent 模块 (checkpointer=MemorySaver)...")
+
+    # 检索服务（复用现有 vector_store）
+    retrieval_service = RetrievalService(_store)
+
+    # Web 搜索服务
+    web_search_service = WebSearchService(api_key=settings.tavily_api_key)
+    if web_search_service.is_available:
+        logger.info("Web 搜索服务已启用 (Tavily)")
+    else:
+        logger.info("Web 搜索服务未启用 (缺少 TAVILY_API_KEY)")
+
+    # 编译 Agent 主图（内部创建 MemorySaver checkpointer）
+    agent_graph = build_agent_graph(
+        retrieval_service=retrieval_service,
+        web_search_service=web_search_service,
+        settings=settings,
+    )
+
+    # 获取 checkpointer 并注入到 API 层
+    from app.agent.graph import get_checkpointer
+    checkpointer = get_checkpointer()
+
+    # 注入到 Agent API 模块
+    set_agent_graph(agent_graph)
+    set_checkpointer(checkpointer)
+
+    logger.info("Agent 模块初始化完成 (thread 级状态持久化已启用)")
     logger.info("服务就绪: http://%s:%d", settings.host, settings.port)
     yield
 
@@ -62,7 +95,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="多模态文档问答助手",
     description="基于智谱 GLM-4V + FAISS 的多模态 RAG 问答系统",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -78,6 +111,7 @@ app.add_middleware(
 # 注册 API 路由
 app.include_router(ingest_router)
 app.include_router(chat_router)
+app.include_router(agent_router)
 
 # 挂载静态文件（前端页面）
 static_dir = "static"
@@ -93,7 +127,7 @@ async def root():
     index_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"message": "多模态文档问答助手 V1", "docs": "/docs"}
+    return {"message": "多模态文档问答助手 V2", "docs": "/docs"}
 
 
 @app.get("/health")

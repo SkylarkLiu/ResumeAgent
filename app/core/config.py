@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 50
     allowed_extensions: list[str] = [".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md"]
 
+    # ---- Agent ----
+    agent_max_history: int = 20
+    agent_default_route: str = "direct"  # fallback 路由
+
+    # ---- Web 搜索 ----
+    tavily_api_key: str = ""
+    web_search_max_results: int = 5
+    web_search_result_max_chars: int = 500
+
     @property
     def faiss_index_path(self) -> Path:
         return Path(self.faiss_index_dir)

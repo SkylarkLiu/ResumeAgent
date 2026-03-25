@@ -22,23 +22,14 @@
             <header id="header">
                 <h1>多模态文档问答助手</h1>
                 <div id="header-actions">
+                    <button id="btn-resume" class="btn-header btn-resume" title="简历分析">📋 简历分析</button>
+                    <button id="btn-new-session" class="btn-header" title="新建会话">🔄 新建会话</button>
                     <span id="status-indicator" class="status-ready">● 就绪</span>
                 </div>
             </header>
 
             <!-- 消息区域 -->
             <div id="chat-messages">
-                <div class="message welcome">
-                    <div class="message-content">
-                        <p>👋 你好！我是多模态文档问答助手。</p>
-                        <p>你可以：</p>
-                        <ul>
-                            <li>📤 上传 <strong>PDF / 图片 / 文本</strong> 文件到知识库</li>
-                            <li>💬 基于已上传的知识进行问答</li>
-                            <li>🖼️ 直接发送图片进行即时问答</li>
-                        </ul>
-                    </div>
-                </div>
             </div>
 
             <!-- 图片预览（发送前） -->
@@ -50,7 +41,7 @@
             <!-- 输入区域 -->
             <div id="input-area">
                 <div id="input-actions">
-                    <button id="btn-upload" title="上传文件">📎</button>
+                    <button id="btn-upload" title="上传文件到知识库">📎</button>
                     <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.txt,.md" hidden multiple>
                     <button id="btn-image" title="发送图片问答">🖼️</button>
                     <input type="file" id="image-input" accept=".png,.jpg,.jpeg" hidden>
@@ -61,7 +52,7 @@
         </main>
     </div>
 
-    <!-- 上传进度模态框 -->
+    <!-- 上传进度模态框（知识库文件） -->
     <div id="upload-modal" class="modal hidden">
         <div class="modal-content">
             <h3>📤 文件处理中</h3>
@@ -72,6 +63,51 @@
                 <p id="upload-status-text">准备中...</p>
             </div>
             <button id="btn-close-modal" class="hidden">关闭</button>
+        </div>
+    </div>
+
+    <!-- 简历分析模态框 -->
+    <div id="resume-modal" class="modal hidden">
+        <div class="modal-content resume-modal-content">
+            <div class="resume-modal-header">
+                <h3>📋 简历分析</h3>
+                <button id="btn-close-resume" class="btn-modal-close">✕</button>
+            </div>
+
+            <!-- Tab 切换 -->
+            <div class="resume-tabs">
+                <button class="resume-tab active" data-tab="upload">📄 上传简历</button>
+                <button class="resume-tab" data-tab="paste">📝 粘贴文本</button>
+            </div>
+
+            <!-- 上传 Tab -->
+            <div id="resume-tab-upload" class="resume-tab-content active">
+                <div id="resume-drop-zone" class="drop-zone">
+                    <div class="drop-zone-content">
+                        <span class="drop-icon">📤</span>
+                        <p>拖拽简历文件到此处，或 <strong>点击选择</strong></p>
+                        <p class="drop-hint">支持 PDF、PNG、JPG、TXT、MD（最大 50MB）</p>
+                    </div>
+                    <input type="file" id="resume-file-input" accept=".pdf,.png,.jpg,.jpeg,.txt,.md" hidden>
+                </div>
+                <div id="resume-file-info" class="hidden">
+                    <span id="resume-file-name"></span>
+                    <button id="btn-clear-resume-file" class="btn-small">✕ 移除</button>
+                </div>
+            </div>
+
+            <!-- 粘贴 Tab -->
+            <div id="resume-tab-paste" class="resume-tab-content">
+                <textarea id="resume-text-input" placeholder="在此粘贴你的简历内容..." rows="8"></textarea>
+            </div>
+
+            <!-- 分析选项 -->
+            <div class="resume-options">
+                <input type="text" id="resume-position" placeholder="目标岗位（选填，如：Java后端工程师）">
+                <input type="text" id="resume-question" placeholder="分析要求（选填，如：重点分析项目经历）" value="请对我的简历进行全面分析评估">
+            </div>
+
+            <button id="btn-start-analysis" class="btn-primary">🔍 开始分析</button>
         </div>
     </div>
 

@@ -1,5 +1,6 @@
 /* ============================================
    多模态文档问答助手 - 样式
+   阶段 3：新增简历分析模态框 + Markdown 渲染
    ============================================ */
 
 * {
@@ -134,6 +135,71 @@ body {
     font-weight: 600;
 }
 
+#header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.btn-header {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: var(--text-primary);
+}
+
+.btn-header:hover {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+.btn-resume {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    font-weight: 500;
+}
+
+.btn-resume:hover {
+    opacity: 0.9;
+    background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+}
+
+/* 路由来源标签 */
+.route-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    margin-bottom: 6px;
+}
+
+.route-tag.kb {
+    background: rgba(67, 97, 238, 0.12);
+    color: #4361ee;
+}
+
+.route-tag.web {
+    background: rgba(255, 159, 28, 0.12);
+    color: #e68a00;
+}
+
+.route-tag.direct {
+    background: rgba(46, 196, 182, 0.12);
+    color: #2ec4b6;
+}
+
+.route-tag.resume_analysis {
+    background: rgba(118, 75, 162, 0.12);
+    color: #764ba2;
+}
+
 .status-ready { color: var(--success); }
 .status-processing { color: var(--warning); }
 .status-error { color: var(--error); }
@@ -150,7 +216,7 @@ body {
 
 .message {
     display: flex;
-    max-width: 75%;
+    max-width: 85%;
 }
 
 .message.user {
@@ -191,6 +257,70 @@ body {
     padding: 2px 6px;
     border-radius: 4px;
     font-size: 13px;
+}
+
+.message-content pre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 12px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: 10px 0;
+}
+
+.message-content pre code {
+    background: transparent;
+    padding: 0;
+    color: inherit;
+    font-size: 13px;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.message-content a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px dashed var(--accent);
+}
+
+.message-content a:hover {
+    border-bottom-style: solid;
+}
+
+/* Markdown 表格样式 */
+.message-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0;
+    font-size: 13px;
+}
+
+.message-content th,
+.message-content td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+}
+
+.message-content th {
+    background: var(--bg-primary);
+    font-weight: 600;
+}
+
+.message-content h2,
+.message-content h3,
+.message-content h4 {
+    margin: 12px 0 6px 0;
+    font-weight: 600;
+}
+
+.message-content h2 { font-size: 16px; }
+.message-content h3 { font-size: 15px; }
+.message-content h4 { font-size: 14px; }
+
+.message-content hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 12px 0;
 }
 
 /* 来源引用 */
@@ -369,7 +499,7 @@ body {
     cursor: not-allowed;
 }
 
-/* --- 模态框 --- */
+/* --- 模态框（通用） --- */
 .modal {
     position: fixed;
     top: 0;
@@ -434,6 +564,218 @@ body {
 
 #btn-close-modal:hover {
     background: var(--accent-hover);
+}
+
+/* --- 简历分析模态框 --- */
+.resume-modal-content {
+    min-width: 520px;
+    max-width: 600px;
+    padding: 0;
+}
+
+.resume-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px 12px;
+}
+
+.resume-modal-header h3 {
+    margin-bottom: 0;
+}
+
+.btn-modal-close {
+    background: none;
+    border: none;
+    font-size: 18px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: background 0.2s;
+}
+
+.btn-modal-close:hover {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+
+/* Tab 切换 */
+.resume-tabs {
+    display: flex;
+    padding: 0 24px;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.resume-tab {
+    padding: 10px 20px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text-secondary);
+    transition: all 0.2s;
+}
+
+.resume-tab:hover {
+    color: var(--text-primary);
+}
+
+.resume-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 500;
+}
+
+.resume-tab-content {
+    display: none;
+    padding: 16px 24px;
+}
+
+.resume-tab-content.active {
+    display: block;
+}
+
+/* 拖拽上传区 */
+.drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 32px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(67, 97, 238, 0.04);
+}
+
+.drop-zone-content .drop-icon {
+    font-size: 32px;
+    display: block;
+    margin-bottom: 8px;
+}
+
+.drop-zone-content p {
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.drop-zone-content p strong {
+    color: var(--accent);
+}
+
+.drop-hint {
+    font-size: 12px !important;
+    margin-top: 4px;
+    color: #999 !important;
+}
+
+/* 已选文件信息 */
+#resume-file-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--bg-primary);
+    border-radius: var(--radius);
+    font-size: 13px;
+}
+
+#resume-file-info.hidden {
+    display: none;
+}
+
+.btn-small {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    transition: all 0.2s;
+}
+
+.btn-small:hover {
+    background: var(--error);
+    color: white;
+    border-color: var(--error);
+}
+
+/* 粘贴文本区 */
+#resume-text-input {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    font-size: 13px;
+    resize: vertical;
+    min-height: 160px;
+    font-family: inherit;
+    outline: none;
+    line-height: 1.6;
+    transition: border-color 0.2s;
+}
+
+#resume-text-input:focus {
+    border-color: var(--accent);
+}
+
+/* 分析选项 */
+.resume-options {
+    padding: 0 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.resume-options input {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    font-size: 13px;
+    outline: none;
+    font-family: inherit;
+    transition: border-color 0.2s;
+}
+
+.resume-options input:focus {
+    border-color: var(--accent);
+}
+
+.resume-options input::placeholder {
+    color: #aaa;
+}
+
+/* 开始分析按钮 */
+.btn-primary {
+    display: block;
+    width: calc(100% - 48px);
+    margin: 0 24px 20px;
+    padding: 12px 0;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.btn-primary:hover {
+    opacity: 0.9;
+}
+
+.btn-primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
 }
 
 .hidden {
