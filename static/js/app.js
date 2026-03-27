@@ -35,6 +35,7 @@ function showWelcome() {
             <li>💬 基于已上传的知识进行问答</li>
             <li>🖼️ 直接发送图片进行即时问答</li>
             <li>🌐 询问实时信息（自动网络搜索）</li>
+            <li>🎯 <strong>岗位分析</strong> — 上传或粘贴JD，获取技术要求解读+简历建议</li>
             <li>📋 <strong>简历分析</strong> — 上传或粘贴简历，获取专业评估报告</li>
         </ul>
         <p style="margin-top:8px;font-size:12px;color:#999;">会话 ID: ${escapeHtml(sessionId)}</p>
@@ -78,8 +79,25 @@ const resumePosition = document.getElementById('resume-position');
 const resumeQuestion = document.getElementById('resume-question');
 const btnStartAnalysis = document.getElementById('btn-start-analysis');
 
+// JD 分析相关 DOM
+const btnJd = document.getElementById('btn-jd');
+const jdModal = document.getElementById('jd-modal');
+const btnCloseJd = document.getElementById('btn-close-jd');
+const jdTabs = document.querySelectorAll('.jd-tab');
+const jdTabUpload = document.getElementById('jd-tab-upload');
+const jdTabPaste = document.getElementById('jd-tab-paste');
+const jdDropZone = document.getElementById('jd-drop-zone');
+const jdFileInput = document.getElementById('jd-file-input');
+const jdFileInfo = document.getElementById('jd-file-info');
+const jdFileName = document.getElementById('jd-file-name');
+const btnClearJdFile = document.getElementById('btn-clear-jd-file');
+const jdTextInput = document.getElementById('jd-text-input');
+const jdQuestion = document.getElementById('jd-question');
+const btnStartJdAnalysis = document.getElementById('btn-start-jd-analysis');
+
 let pendingImageBase64 = null;
 let pendingResumeFile = null;
+let pendingJdFile = null;
 let isProcessing = false;
 
 // --- 工具函数 ---
@@ -166,7 +184,8 @@ function appendMessage(role, content, sources = null, routeType = null, isMarkdo
                 kb: '📚 知识库',
                 web: '🌐 网络',
                 direct: '💬 直接回答',
-                resume_analysis: '📋 简历分析'
+                resume_analysis: '📋 简历分析',
+                jd_analysis: '🎯 岗位分析'
             };
             html += `<span class="route-tag ${routeType}">${routeLabels[routeType] || routeType}</span><br>`;
         }
@@ -614,6 +633,166 @@ btnStartAnalysis.addEventListener('click', () => {
             return;
         }
         analyzeResume(null, text);
+    }
+});
+
+// --- JD 分析模态框逻辑 ---
+
+// Tab 切换
+jdTabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+        jdTabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+
+        const tabName = tab.dataset.tab;
+        document.querySelectorAll('.jd-tab-content').forEach(c => c.classList.remove('active'));
+        document.getElementById(`jd-tab-${tabName}`).classList.add('active');
+    });
+});
+
+// 打开 JD 分析模态框
+btnJd.addEventListener('click', () => {
+    jdModal.classList.remove('hidden');
+});
+
+// 关闭 JD 分析模态框
+btnCloseJd.addEventListener('click', () => {
+    jdModal.classList.add('hidden');
+});
+
+// 拖拽上传
+jdDropZone.addEventListener('click', () => jdFileInput.click());
+
+jdDropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    jdDropZone.classList.add('drag-over');
+});
+
+jdDropZone.addEventListener('dragleave', () => {
+    jdDropZone.classList.remove('drag-over');
+});
+
+jdDropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    jdDropZone.classList.remove('drag-over');
+    if (e.dataTransfer.files.length > 0) {
+        handleJdFileSelect(e.dataTransfer.files[0]);
+    }
+});
+
+jdFileInput.addEventListener('change', (e) => {
+    if (e.target.files.length > 0) {
+        handleJdFileSelect(e.target.files[0]);
+        e.target.value = '';
+    }
+});
+
+function handleJdFileSelect(file) {
+    const allowed = ['.pdf', '.png', '.jpg', '.jpeg', '.txt', '.md'];
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    if (!allowed.includes(ext)) {
+        alert('不支持的文件格式，请上传 PDF、图片或文本文件');
+        return;
+    }
+    pendingJdFile = file;
+    jdFileName.textContent = `📎 ${file.name} (${(file.size / 1024).toFixed(1)}KB)`;
+    jdDropZone.classList.add('hidden');
+    jdFileInfo.classList.remove('hidden');
+}
+
+btnClearJdFile.addEventListener('click', () => {
+    pendingJdFile = null;
+    jdDropZone.classList.remove('hidden');
+    jdFileInfo.classList.add('hidden');
+});
+
+// 开始 JD 分析
+async function analyzeJD(file, text) {
+    if (isProcessing) return;
+    isProcessing = true;
+    btnStartJdAnalysis.disabled = true;
+    btnStartJdAnalysis.textContent = '⏳ 分析中...';
+
+    const question = jdQuestion.value.trim() || '请分析该岗位的核心要求并给出简历写作建议';
+
+    // 显示用户消息
+    let userMsg = '🎯 请分析以下岗位JD';
+    if (file) userMsg += `（文件：${file.name}）`;
+    if (question !== '请分析该岗位的核心要求并给出简历写作建议') userMsg += `\n要求：${question}`;
+
+    appendMessage('user', userMsg);
+    appendTypingIndicator();
+    jdModal.classList.add('hidden');
+
+    try {
+        let res;
+        if (file) {
+            // 文件上传方式
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('question', question);
+            formData.append('session_id', sessionId);
+
+            res = await fetch(`${API_BASE}/agent/jd-upload`, {
+                method: 'POST',
+                body: formData
+            });
+        } else {
+            // 文本粘贴方式
+            res = await fetch(`${API_BASE}/agent/jd-analysis`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    jd_text: text,
+                    question,
+                    session_id: sessionId
+                })
+            });
+        }
+
+        const data = await res.json();
+        removeTypingIndicator();
+
+        if (res.ok) {
+            if (data.session_id && data.session_id !== sessionId) {
+                sessionId = data.session_id;
+                localStorage.setItem('agent_session_id', sessionId);
+            }
+            // JD 分析用 Markdown 渲染
+            appendMessage('ai', data.answer, null, 'jd_analysis', true);
+        } else {
+            appendMessage('ai', `❌ JD 分析失败：${data.detail || '未知错误'}`);
+            setStatus('错误', 'error');
+            return;
+        }
+        setStatus('就绪', 'ready');
+    } catch (err) {
+        removeTypingIndicator();
+        appendMessage('ai', `❌ 网络错误：${err.message}`);
+        setStatus('错误', 'error');
+    } finally {
+        isProcessing = false;
+        btnStartJdAnalysis.disabled = false;
+        btnStartJdAnalysis.textContent = '🔍 开始分析';
+    }
+}
+
+btnStartJdAnalysis.addEventListener('click', () => {
+    const activeTab = document.querySelector('.jd-tab.active').dataset.tab;
+
+    if (activeTab === 'upload') {
+        if (!pendingJdFile) {
+            alert('请先上传 JD 文件');
+            return;
+        }
+        analyzeJD(pendingJdFile, null);
+    } else {
+        const text = jdTextInput.value.trim();
+        if (!text) {
+            alert('请粘贴 JD 内容');
+            return;
+        }
+        analyzeJD(null, text);
     }
 });
 

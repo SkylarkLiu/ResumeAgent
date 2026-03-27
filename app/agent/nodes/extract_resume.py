@@ -198,9 +198,13 @@ def _extract_from_image_base64(image_base64: str) -> str:
         from zai import ZhipuAiClient
 
         from app.core.config import get_settings
+        from app.services.vision_service import compress_image_base64
 
         settings = get_settings()
         client = ZhipuAiClient(api_key=settings.zhipuai_api_key)
+
+        # 压缩大图，防止超过 API 大小限制（返回 b64 + mime）
+        b64, mime = compress_image_base64(image_base64)
 
         response = client.chat.completions.create(
             model=settings.vision_model_name,
@@ -210,7 +214,7 @@ def _extract_from_image_base64(image_base64: str) -> str:
                     "content": [
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                            "image_url": {"url": f"data:image/{mime};base64,{b64}"},
                         },
                         {
                             "type": "text",
@@ -219,8 +223,6 @@ def _extract_from_image_base64(image_base64: str) -> str:
                     ],
                 }
             ],
-            temperature=0,
-            max_tokens=4096,
         )
 
         text = response.choices[0].message.content or ""

@@ -49,8 +49,16 @@ def generate_analysis(state: AgentState) -> dict:
     resume_for_prompt = {k: v for k, v in resume_data.items() if k != "raw_text"}
     resume_json = json.dumps(resume_for_prompt, ensure_ascii=False, indent=2)
 
-    # JD 上下文
-    jd_context = working_context if working_context else "（知识库中暂无匹配的岗位要求标准，将基于通用后端岗位标准进行评估）"
+    # JD 上下文（优先使用真实 JD，无则用知识库检索结果）
+    jd_data = state.get("jd_data")
+    if jd_data and isinstance(jd_data, dict) and not jd_data.get("extract_error") and working_context:
+        # working_context 已经由 retrieve_jd 填充为真实 JD 数据
+        jd_context = working_context
+        logger.info("使用真实 JD 数据进行简历分析")
+    elif working_context:
+        jd_context = working_context
+    else:
+        jd_context = "（知识库中暂无匹配的岗位要求标准，将基于通用后端岗位标准进行评估）"
 
     # 构造 prompt
     prompt = RESUME_ANALYSIS_PROMPT.format(

@@ -23,6 +23,7 @@ class TaskType(str, Enum):
     """任务类型路由"""
     QA = "qa"
     RESUME_ANALYSIS = "resume_analysis"
+    JD_ANALYSIS = "jd_analysis"
 
 
 class RouteDecision(BaseModel):
@@ -62,6 +63,11 @@ class AgentState(TypedDict, total=False):
     # 输入阶段: {"raw_text": str} 或 {"file_path": str} 或 {"file_base64": str}
     # 提取后: {"name", "skills", "experience", "education", "projects", "summary", ...}
     resume_data: dict | None
+
+    # ---- JD 分析子图 ----
+    # 输入阶段: {"raw_text": str}（JD 原文）
+    # 提取后: {"position", "company", "skills_must", "tech_stack", "summary", ...}
+    jd_data: dict | None
 
     # ---- 最终输出 ----
     final_answer: str

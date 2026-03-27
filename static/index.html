@@ -22,6 +22,7 @@
             <header id="header">
                 <h1>多模态文档问答助手</h1>
                 <div id="header-actions">
+                    <button id="btn-jd" class="btn-header btn-jd" title="岗位JD分析">🎯 岗位分析</button>
                     <button id="btn-resume" class="btn-header btn-resume" title="简历分析">📋 简历分析</button>
                     <button id="btn-new-session" class="btn-header" title="新建会话">🔄 新建会话</button>
                     <span id="status-indicator" class="status-ready">● 就绪</span>
@@ -108,6 +109,50 @@
             </div>
 
             <button id="btn-start-analysis" class="btn-primary">🔍 开始分析</button>
+        </div>
+    </div>
+
+    <!-- JD 分析模态框 -->
+    <div id="jd-modal" class="modal hidden">
+        <div class="modal-content jd-modal-content">
+            <div class="jd-modal-header">
+                <h3>🎯 岗位JD分析</h3>
+                <button id="btn-close-jd" class="btn-modal-close">✕</button>
+            </div>
+
+            <!-- Tab 切换 -->
+            <div class="jd-tabs">
+                <button class="jd-tab active" data-tab="upload">📄 上传JD文件</button>
+                <button class="jd-tab" data-tab="paste">📝 粘贴JD文本</button>
+            </div>
+
+            <!-- 上传 Tab -->
+            <div id="jd-tab-upload" class="jd-tab-content active">
+                <div id="jd-drop-zone" class="drop-zone">
+                    <div class="drop-zone-content">
+                        <span class="drop-icon">📤</span>
+                        <p>拖拽 JD 文件到此处，或 <strong>点击选择</strong></p>
+                        <p class="drop-hint">支持 PDF、PNG、JPG、TXT、MD（最大 50MB）</p>
+                    </div>
+                    <input type="file" id="jd-file-input" accept=".pdf,.png,.jpg,.jpeg,.txt,.md" hidden>
+                </div>
+                <div id="jd-file-info" class="hidden">
+                    <span id="jd-file-name"></span>
+                    <button id="btn-clear-jd-file" class="btn-small">✕ 移除</button>
+                </div>
+            </div>
+
+            <!-- 粘贴 Tab -->
+            <div id="jd-tab-paste" class="jd-tab-content">
+                <textarea id="jd-text-input" placeholder="在此粘贴岗位描述（JD）内容..." rows="8"></textarea>
+            </div>
+
+            <!-- 分析选项 -->
+            <div class="jd-options">
+                <input type="text" id="jd-question" placeholder="分析要求（选填，如：重点关注技术栈要求）" value="请分析该岗位的核心要求并给出简历写作建议">
+            </div>
+
+            <button id="btn-start-jd-analysis" class="btn-primary btn-jd-primary">🔍 开始分析</button>
         </div>
     </div>
 

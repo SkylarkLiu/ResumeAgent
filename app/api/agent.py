@@ -1,12 +1,13 @@
 """
-Agent API 路由 - /agent/chat + /agent/session + /agent/resume-analysis + /agent/resume-upload
+Agent API 路由 - /agent/chat + /agent/session + /agent/resume-analysis + /agent/resume-upload + /agent/jd-analysis
 
 阶段 3 改造：新增简历分析接口
 - /agent/resume-analysis: 文本粘贴方式分析简历
 - /agent/resume-upload: 文件上传方式分析简历（PDF/图片/文本）
 
-阶段 4 改造：新增流式输出接口
+阶段 4 改造：新增流式输出接口 + JD 分析接口
 - /agent/chat/stream: SSE 流式返回 Agent 回答
+- /agent/jd-analysis: JD 岗位分析（文本粘贴/文件上传）
 """
 from __future__ import annotations
 
@@ -30,6 +31,8 @@ from app.schemas.agent import (
     AgentChatRequest,
     AgentChatResponse,
     AgentSourceItem,
+    JDAnalysisRequest,
+    JDAnalysisResponse,
     ResumeAnalysisRequest,
     ResumeAnalysisResponse,
     SessionInfo,
@@ -485,6 +488,182 @@ async def resume_analysis_upload(
         return ResumeAnalysisResponse(
             answer=f"简历分析出错：{e}",
             resume_data={},
+            session_id=session_id,
+        )
+
+
+# ---- JD 分析接口 ----
+
+async def _invoke_jd_analysis(
+    jd_data: dict,
+    question: str,
+    session_id: str,
+) -> JDAnalysisResponse:
+    """执行 JD 分析图调用"""
+    config = {"configurable": {"thread_id": session_id}}
+
+    input_state = {
+        "messages": [HumanMessage(content=question)],
+        "context_sources": [],
+        "working_context": "",
+        "final_answer": "",
+        "jd_data": jd_data,
+    }
+
+    result = await _agent_graph.ainvoke(input_state, config=config)
+
+    answer = result.get("final_answer", "")
+    extracted_jd = result.get("jd_data", {})
+
+    logger.info(
+        "JD 分析完成: session=%s, answer=%d字符, position=%s",
+        session_id,
+        len(answer),
+        extracted_jd.get("position", "未知"),
+    )
+
+    return JDAnalysisResponse(
+        answer=answer,
+        jd_data={k: v for k, v in extracted_jd.items() if k not in ("raw_text",)},
+        session_id=session_id,
+    )
+
+
+@router.post("/jd-analysis", response_model=JDAnalysisResponse)
+async def jd_analysis_text(request: JDAnalysisRequest):
+    """
+    JD 分析接口（文本粘贴方式）。
+
+    用户直接粘贴 JD 文本，后端提取 → 分析 → 返回岗位解读 + 简历写作建议。
+    JD 数据自动存入 session state，后续同一 session 的简历分析将使用真实 JD。
+    """
+    if _agent_graph is None:
+        return JDAnalysisResponse(
+            answer="Agent 服务未初始化，请检查服务启动日志。",
+            jd_data={},
+            session_id=request.session_id,
+        )
+
+    if not request.jd_text.strip():
+        return JDAnalysisResponse(
+            answer="请提供 JD 岗位描述文本内容。",
+            jd_data={},
+            session_id=request.session_id,
+        )
+
+    session_id = _ensure_session(request.session_id)
+
+    jd_data = {
+        "raw_text": request.jd_text.strip(),
+    }
+
+    try:
+        return await _invoke_jd_analysis(jd_data, request.question, session_id)
+    except Exception as e:
+        logger.error("JD 分析异常: %s", e, exc_info=True)
+        return JDAnalysisResponse(
+            answer=f"JD 分析出错：{e}",
+            jd_data={},
+            session_id=session_id,
+        )
+
+
+@router.post("/jd-upload", response_model=JDAnalysisResponse)
+async def jd_analysis_upload(
+    file: UploadFile = File(..., description="JD 文件（PDF/图片/文本）"),
+    question: str = Form(default="请分析该岗位的核心要求并给出简历写作建议", description="分析要求"),
+    session_id: str = Form(default="", description="会话 ID"),
+):
+    """
+    JD 分析接口（文件上传方式）。
+
+    支持上传 PDF、图片（PNG/JPG）、文本文件。
+    """
+    if _agent_graph is None:
+        return JDAnalysisResponse(
+            answer="Agent 服务未初始化，请检查服务启动日志。",
+            jd_data={},
+            session_id=session_id,
+        )
+
+    # 校验文件类型
+    allowed_ext = {".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md"}
+    filename = file.filename or ""
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    if ext not in allowed_ext:
+        return JDAnalysisResponse(
+            answer=f"不支持的文件格式：{ext}。请上传 PDF、图片或文本文件。",
+            jd_data={},
+            session_id=session_id,
+        )
+
+    # 校验文件大小
+    content = await file.read()
+    max_size = settings.max_upload_size_mb * 1024 * 1024
+    if len(content) > max_size:
+        return JDAnalysisResponse(
+            answer=f"文件过大（{len(content) / 1024 / 1024:.1f}MB），最大支持 {settings.max_upload_size_mb}MB。",
+            jd_data={},
+            session_id=session_id,
+        )
+
+    session_id = _ensure_session(session_id)
+
+    # 根据文件类型构建 jd_data
+    if ext in (".txt", ".md"):
+        try:
+            raw_text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            raw_text = content.decode("gbk", errors="replace")
+        jd_data = {"raw_text": raw_text}
+    elif ext in (".png", ".jpg", ".jpeg"):
+        b64 = base64.b64encode(content).decode("utf-8")
+        # 图片走视觉 OCR 提取（复用 extract_resume 的图片处理逻辑）
+        jd_data = {"raw_text": "", "file_base64": b64, "is_image": True}
+    else:
+        import os
+        import tempfile
+
+        tmp_dir = tempfile.mkdtemp()
+        tmp_path = os.path.join(tmp_dir, f"jd_{uuid.uuid4().hex[:8]}{ext}")
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+        jd_data = {"raw_text": "", "file_path": tmp_path, "is_file": True}
+
+    try:
+        # 对于图片/PDF，需要先提取文本再走 JD 分析
+        if jd_data.get("is_image"):
+            from app.agent.nodes.extract_resume import _extract_from_image_base64
+            raw_text = _extract_from_image_base64(jd_data["file_base64"])
+            if raw_text:
+                jd_data["raw_text"] = raw_text
+                del jd_data["file_base64"]
+            else:
+                return JDAnalysisResponse(
+                    answer="图片 JD 文本提取失败，请尝试粘贴 JD 文本或上传 PDF/文本文件。",
+                    jd_data={},
+                    session_id=session_id,
+                )
+        elif jd_data.get("is_file"):
+            from app.agent.nodes.extract_resume import _extract_from_file
+            raw_text = _extract_from_file(jd_data["file_path"])
+            if raw_text:
+                jd_data["raw_text"] = raw_text
+                del jd_data["file_path"]
+            else:
+                return JDAnalysisResponse(
+                    answer="文件 JD 文本提取失败，请尝试粘贴 JD 文本或上传其他格式文件。",
+                    jd_data={},
+                    session_id=session_id,
+                )
+
+        return await _invoke_jd_analysis(jd_data, question, session_id)
+    except Exception as e:
+        logger.error("JD 分析异常: %s", e, exc_info=True)
+        return JDAnalysisResponse(
+            answer=f"JD 分析出错：{e}",
+            jd_data={},
             session_id=session_id,
         )
 

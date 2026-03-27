@@ -25,16 +25,47 @@ def set_retrieval_service_jd(service, top_k: int = 5) -> None:
 
 def retrieve_jd(state: AgentState) -> dict:
     """
-    JD 检索节点：从简历信息中提取关键词，检索知识库中匹配的岗位标准。
+    JD 检索节点：优先使用 session 中已有的 jd_data（真实 JD），
+    如果没有则从知识库中检索匹配的岗位要求标准。
 
     检索策略：
-    1. 用 skills + target_position 组合查询
-    2. 用 summary 作为补充查询
-    3. 合并去重后写入 context_sources
+    1. 检查 state["jd_data"] 是否已有结构化数据
+    2. 有 → 直接序列化为 working_context，跳过知识库检索
+    3. 无 → 走原有逻辑（skills + target_position 检索知识库）
 
     Returns:
         {"context_sources": list[dict], "working_context": str}
     """
+    # ---- 优先：使用 session 中的真实 JD ----
+    jd_data = state.get("jd_data")
+    if jd_data and isinstance(jd_data, dict) and not jd_data.get("extract_error"):
+        # 序列化 jd_data 为文本上下文
+        import json
+
+        jd_for_context = {k: v for k, v in jd_data.items() if k not in ("raw_text", "extract_error")}
+        jd_json = json.dumps(jd_for_context, ensure_ascii=False, indent=2)
+
+        position = jd_data.get("position", "未知岗位")
+        company = jd_data.get("company", "")
+        label = f"【用户上传的 JD - {position}】"
+        if company:
+            label += f" {company}"
+
+        working_context = f"{label}\n{jd_json}"
+        context_sources = [{"content": working_context, "source": f"用户上传的 JD ({position})", "score": 1.0, "type": "jd_upload"}]
+
+        logger.info(
+            "使用 session 中的真实 JD: position=%s, company=%s",
+            position,
+            company,
+        )
+
+        return {
+            "context_sources": context_sources,
+            "working_context": working_context,
+        }
+
+    # ---- 降级：知识库检索 ----
     resume_data = state.get("resume_data") or {}
 
     if _retrieval_service is None:

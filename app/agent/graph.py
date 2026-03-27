@@ -5,6 +5,10 @@ Agent 主图 - StateGraph 定义 + 编译 + Checkpointer 管理
 - 条件边同时判断 task_type + route_type
 - resume_analysis 走: extract_resume → retrieve_jd → generate_analysis
 - qa 走现有路径: kb/web/direct → normalize → generate
+
+阶段 4 改造：新增 JD 分析路径
+- jd_analysis 走: extract_jd → analyze_jd
+- JD 数据存入 session state，后续简历分析可复用
 """
 from __future__ import annotations
 
@@ -16,6 +20,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.nodes.extract_resume import extract_resume
+from app.agent.nodes.analyze_jd import analyze_jd
+from app.agent.nodes.extract_jd import extract_jd
 from app.agent.nodes.generate import generate, set_max_history
 from app.agent.nodes.generate_analysis import generate_analysis
 from app.agent.nodes.kb_search import search_kb, set_retrieval_service
@@ -58,6 +64,10 @@ def _route_decision(state: AgentState) -> str:
     if task_type_str == "resume_analysis":
         return "resume_analysis"
 
+    # JD 分析
+    if task_type_str == "jd_analysis":
+        return "jd_analysis"
+
     # QA 路径：按 route_type 分发
     return route_type_str
 
@@ -70,9 +80,10 @@ def build_agent_graph(
     """
     构建并编译 Agent 主图。
 
-    图结构（阶段 3）：
+    图结构（阶段 4）：
                                 ┌── extract_resume ── retrieve_jd ── generate_analysis ──┐
-    START → router ──task──┤                                                         ├── END
+    START → router ──task──┤                                                           ├── END
+                                ├── jd_analysis ── extract_jd ── analyze_jd ────────────┤
                                 └── (QA: retrieve / web / direct → normalize → generate)─┘
 
     Args:
@@ -107,15 +118,20 @@ def build_agent_graph(
     builder.add_node("retrieve_jd", retrieve_jd)
     builder.add_node("generate_analysis", generate_analysis)
 
+    # JD 分析子图节点
+    builder.add_node("extract_jd", extract_jd)
+    builder.add_node("analyze_jd", analyze_jd)
+
     # 添加边
     builder.add_edge(START, "router")
 
-    # 条件边：router → resume_analysis / retrieve / web / direct
+    # 条件边：router → resume_analysis / jd_analysis / retrieve / web / direct
     builder.add_conditional_edges(
         "router",
         _route_decision,
         {
             "resume_analysis": "extract_resume",
+            "jd_analysis": "extract_jd",
             "retrieve": "search_kb",
             "web": "search_web",
             "direct": "generate",
@@ -134,14 +150,18 @@ def build_agent_graph(
     builder.add_edge("extract_resume", "retrieve_jd")
     builder.add_edge("retrieve_jd", "generate_analysis")
 
-    # 两条路径都汇入 END
+    # JD 分析子图路径：extract_jd → analyze_jd
+    builder.add_edge("extract_jd", "analyze_jd")
+
+    # 三条路径都汇入 END
     builder.add_edge("generate", END)
     builder.add_edge("generate_analysis", END)
+    builder.add_edge("analyze_jd", END)
 
     # 编译（注入 checkpointer 实现 thread 持久化）
     graph = builder.compile(checkpointer=_checkpointer)
     logger.info(
-        "Agent 主图编译完成 (web_available=%s, checkpointer=MemorySaver, 简历分析子图已启用)",
+        "Agent 主图编译完成 (web_available=%s, checkpointer=MemorySaver, 简历分析+JD分析子图已启用)",
         web_available,
     )
     return graph

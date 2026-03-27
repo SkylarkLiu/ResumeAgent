@@ -49,3 +49,17 @@ class ResumeAnalysisResponse(BaseModel):
     resume_data: dict = Field(default_factory=dict, description="提取的结构化简历信息")
     sources: list[AgentSourceItem] = Field(default_factory=list, description="参考的 JD 来源")
     session_id: str = Field(..., description="会话 ID")
+
+
+class JDAnalysisRequest(BaseModel):
+    """JD 分析请求（支持文本粘贴）"""
+    jd_text: str = Field(default="", description="JD 岗位描述文本内容（直接粘贴）")
+    question: str = Field(default="请分析该岗位的核心要求并给出简历写作建议", description="用户问题或分析要求")
+    session_id: str = Field(default="", description="会话 ID")
+
+
+class JDAnalysisResponse(BaseModel):
+    """JD 分析响应"""
+    answer: str = Field(..., description="分析报告（Markdown）")
+    jd_data: dict = Field(default_factory=dict, description="提取的结构化 JD 信息")
+    session_id: str = Field(..., description="会话 ID")
