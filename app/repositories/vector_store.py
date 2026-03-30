@@ -225,3 +225,44 @@ class FAISSVectorStore:
     @property
     def total(self) -> int:
         return self.index.ntotal if self.index else 0
+
+    def delete_by_source(self, source: str) -> int:
+        """
+        删除指定来源的所有向量记录，重建 FAISS 索引。
+
+        Args:
+            source: 要删除的来源文件名（与 VectorRecord.source 精确匹配）
+        Returns:
+            删除的记录数量
+        """
+        if not self.records:
+            logger.info("索引为空，无需删除")
+            return 0
+
+        original_count = len(self.records)
+        self.records = [r for r in self.records if r.source != source]
+        deleted_count = original_count - len(self.records)
+
+        if deleted_count == 0:
+            logger.info("未找到来源为 '%s' 的记录", source)
+            return 0
+
+        # 重建索引
+        if self.records:
+            self.build(self.records)
+        else:
+            # 全部删除后清空索引
+            self.index = None
+            self.dimension = 0
+            self._loaded = False
+
+        self.save()
+        logger.info(
+            "已删除来源 '%s' 的 %d 条记录, 剩余 %d 条",
+            source, deleted_count, len(self.records),
+        )
+        return deleted_count
+
+    def get_sources(self) -> list[str]:
+        """返回知识库中所有不重复的来源文件名"""
+        return sorted(set(r.source for r in self.records))

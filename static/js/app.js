@@ -120,19 +120,29 @@ function escapeHtml(text) {
 function renderMarkdown(text) {
     let html = escapeHtml(text);
 
+    // 安全执行正则替换，避免 LLM 生成的特殊字符导致浏览器 DOMException
+    function safeReplace(str, regex, replacer) {
+        try {
+            return str.replace(regex, replacer);
+        } catch (e) {
+            console.warn('renderMarkdown 正则替换失败:', e, regex);
+            return str; // 跳过该规则，保留原始文本
+        }
+    }
+
     // 代码块（必须先处理，避免内部被其他规则干扰）
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
+    html = safeReplace(html, /```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
         return `<pre><code class="language-${lang}">${code.trim()}</code></pre>`;
     });
 
     // 行内代码
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    html = safeReplace(html, /`([^`]+)`/g, '<code>$1</code>');
 
     // 链接
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+    html = safeReplace(html, /\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
 
     // 表格
-    html = html.replace(/^(\|.+\|)\n(\|[-| :]+\|)\n((?:\|.+\|\n?)+)/gm, (match, header, sep, body) => {
+    html = safeReplace(html, /^(\|.+\|)\n(\|[-| :]+\|)\n((?:\|.+\|\n?)+)/gm, (match, header, sep, body) => {
         const headers = header.split('|').filter(c => c.trim()).map(c => `<th>${c.trim()}</th>`).join('');
         const rows = body.trim().split('\n').map(row => {
             const cells = row.split('|').filter(c => c.trim()).map(c => `<td>${c.trim()}</td>`).join('');
@@ -142,28 +152,28 @@ function renderMarkdown(text) {
     });
 
     // 标题
-    html = html.replace(/^#### (.+)$/gm, '<h5>$1</h5>');
-    html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
-    html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
-    html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
+    html = safeReplace(html, /^#### (.+)$/gm, '<h5>$1</h5>');
+    html = safeReplace(html, /^### (.+)$/gm, '<h4>$1</h4>');
+    html = safeReplace(html, /^## (.+)$/gm, '<h3>$1</h3>');
+    html = safeReplace(html, /^# (.+)$/gm, '<h2>$1</h2>');
 
     // 无序列表
-    html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+    html = safeReplace(html, /^- (.+)$/gm, '<li>$1</li>');
     // 有序列表
-    html = html.replace(/^(\d+)\. (.+)$/gm, '<li>$2</li>');
+    html = safeReplace(html, /^(\d+)\. (.+)$/gm, '<li>$2</li>');
     // 包裹连续的 li 为 ul
-    html = html.replace(/(<li>.*<\/li>\n?)+/g, (match) => `<ul>${match}</ul>`);
+    html = safeReplace(html, /(<li>.*<\/li>\n?)+/g, (match) => `<ul>${match}</ul>`);
 
     // 粗体 / 斜体
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    html = safeReplace(html, /\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = safeReplace(html, /\*(.+?)\*/g, '<em>$1</em>');
 
     // 水平线
-    html = html.replace(/^---$/gm, '<hr>');
+    html = safeReplace(html, /^---$/gm, '<hr>');
 
     // 段落（处理连续换行）
-    html = html.replace(/\n\n+/g, '</p><p>');
-    html = html.replace(/\n/g, '<br>');
+    html = safeReplace(html, /\n\n+/g, '</p><p>');
+    html = safeReplace(html, /\n/g, '<br>');
 
     return `<p>${html}</p>`;
 }
@@ -306,7 +316,12 @@ async function sendChat(question) {
                             // 增量渲染 Markdown
                             const contentEl = msgDiv.querySelector('.message-content');
                             const sourcesHtml = currentSources.length > 0 ? buildSourcesHtml(currentSources) : '';
-                            contentEl.innerHTML = renderMarkdown(fullAnswer) + sourcesHtml;
+                            try {
+                                contentEl.innerHTML = renderMarkdown(fullAnswer) + sourcesHtml;
+                            } catch (renderErr) {
+                                console.warn('Markdown 渲染异常，降级为纯文本:', renderErr);
+                                contentEl.innerHTML = '<p>' + escapeHtml(fullAnswer) + '</p>' + sourcesHtml;
+                            }
                             scrollToBottom();
                         }
 
@@ -385,7 +400,7 @@ async function sendImageChat(question, imageBase64) {
     }
 }
 
-// --- 简历分析 ---
+// --- 简历分析（流式 SSE） ---
 async function analyzeResume(file, text) {
     if (isProcessing) return;
     isProcessing = true;
@@ -433,22 +448,105 @@ async function analyzeResume(file, text) {
             });
         }
 
-        const data = await res.json();
-        removeTypingIndicator();
-
-        if (res.ok) {
-            if (data.session_id && data.session_id !== sessionId) {
-                sessionId = data.session_id;
-                localStorage.setItem('agent_session_id', sessionId);
-            }
-            // 简历分析用 Markdown 渲染
-            appendMessage('ai', data.answer, data.sources, 'resume_analysis', true);
-        } else {
-            appendMessage('ai', `❌ 简历分析失败：${data.detail || '未知错误'}`);
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            removeTypingIndicator();
+            appendMessage('ai', `❌ 简历分析失败：${errData.detail || res.statusText}`);
             setStatus('错误', 'error');
             return;
         }
-        setStatus('就绪', 'ready');
+
+        // SSE 流式读取
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let fullAnswer = '';
+        let currentSources = [];
+        let msgDiv = null;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+
+                try {
+                    const payload = JSON.parse(line.slice(6));
+
+                    if (payload.type === 'extracted') {
+                        // 简历提取完成
+                        removeTypingIndicator();
+                        msgDiv = appendMessage('ai', '', [], 'resume_analysis', true);
+                        setStatus('生成中', 'processing');
+
+                    } else if (payload.type === 'sources') {
+                        // JD 来源
+                        currentSources = payload.sources || [];
+                        if (msgDiv) {
+                            const sourcesHtml = buildSourcesHtml(currentSources);
+                            const existingContent = msgDiv.querySelector('.message-content').innerHTML;
+                            msgDiv.querySelector('.message-content').innerHTML = existingContent + sourcesHtml;
+                        }
+
+                    } else if (payload.type === 'token') {
+                        // 增量文本
+                        fullAnswer += payload.content;
+                        if (msgDiv) {
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            const sourcesHtml = currentSources.length > 0 ? buildSourcesHtml(currentSources) : '';
+                            try {
+                                contentEl.innerHTML = renderMarkdown(fullAnswer) + sourcesHtml;
+                            } catch (renderErr) {
+                                console.warn('简历分析 Markdown 渲染异常，降级为纯文本:', renderErr);
+                                contentEl.innerHTML = '<p>' + escapeHtml(fullAnswer) + '</p>' + sourcesHtml;
+                            }
+                            scrollToBottom();
+                        }
+
+                    } else if (payload.type === 'done') {
+                        // 完成
+                        if (payload.session_id && payload.session_id !== sessionId) {
+                            sessionId = payload.session_id;
+                            localStorage.setItem('agent_session_id', sessionId);
+                        }
+                        // 如果流式过程中没有 token，用 done 中的 answer
+                        if (!fullAnswer && payload.answer) {
+                            fullAnswer = payload.answer;
+                            if (msgDiv) {
+                                const sourcesHtml = currentSources.length > 0 ? buildSourcesHtml(currentSources) : '';
+                                try {
+                                    msgDiv.querySelector('.message-content').innerHTML = renderMarkdown(fullAnswer) + sourcesHtml;
+                                } catch (renderErr) {
+                                    console.warn('简历分析 done Markdown 渲染异常，降级为纯文本:', renderErr);
+                                    msgDiv.querySelector('.message-content').innerHTML = '<p>' + escapeHtml(fullAnswer) + '</p>' + sourcesHtml;
+                                }
+                            }
+                        }
+                        setStatus('就绪', 'ready');
+
+                    } else if (payload.type === 'error') {
+                        removeTypingIndicator();
+                        appendMessage('ai', `❌ ${payload.message}`);
+                        setStatus('错误', 'error');
+                    }
+                } catch (parseErr) {
+                    console.warn('简历分析 SSE 解析失败:', parseErr, line);
+                }
+            }
+        }
+
+        // 如果全程没有收到 extracted 事件（说明完全没数据），确保移除 typing
+        removeTypingIndicator();
+        if (!fullAnswer) {
+            appendMessage('ai', '❌ 简历分析未返回结果');
+            setStatus('错误', 'error');
+        }
     } catch (err) {
         removeTypingIndicator();
         appendMessage('ai', `❌ 网络错误：${err.message}`);
@@ -706,7 +804,7 @@ btnClearJdFile.addEventListener('click', () => {
     jdFileInfo.classList.add('hidden');
 });
 
-// 开始 JD 分析
+// --- JD 分析（流式 SSE） ---
 async function analyzeJD(file, text) {
     if (isProcessing) return;
     isProcessing = true;
@@ -750,22 +848,93 @@ async function analyzeJD(file, text) {
             });
         }
 
-        const data = await res.json();
-        removeTypingIndicator();
-
-        if (res.ok) {
-            if (data.session_id && data.session_id !== sessionId) {
-                sessionId = data.session_id;
-                localStorage.setItem('agent_session_id', sessionId);
-            }
-            // JD 分析用 Markdown 渲染
-            appendMessage('ai', data.answer, null, 'jd_analysis', true);
-        } else {
-            appendMessage('ai', `❌ JD 分析失败：${data.detail || '未知错误'}`);
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            removeTypingIndicator();
+            appendMessage('ai', `❌ JD 分析失败：${errData.detail || res.statusText}`);
             setStatus('错误', 'error');
             return;
         }
-        setStatus('就绪', 'ready');
+
+        // SSE 流式读取
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let fullAnswer = '';
+        let msgDiv = null;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+
+                try {
+                    const payload = JSON.parse(line.slice(6));
+
+                    if (payload.type === 'extracted') {
+                        // JD 提取完成
+                        removeTypingIndicator();
+                        msgDiv = appendMessage('ai', '', [], 'jd_analysis', true);
+                        setStatus('生成中', 'processing');
+
+                    } else if (payload.type === 'token') {
+                        // 增量文本
+                        fullAnswer += payload.content;
+                        if (msgDiv) {
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            try {
+                                contentEl.innerHTML = renderMarkdown(fullAnswer);
+                            } catch (renderErr) {
+                                console.warn('JD 分析 Markdown 渲染异常，降级为纯文本:', renderErr);
+                                contentEl.innerHTML = '<p>' + escapeHtml(fullAnswer) + '</p>';
+                            }
+                            scrollToBottom();
+                        }
+
+                    } else if (payload.type === 'done') {
+                        // 完成
+                        if (payload.session_id && payload.session_id !== sessionId) {
+                            sessionId = payload.session_id;
+                            localStorage.setItem('agent_session_id', sessionId);
+                        }
+                        // 如果流式过程中没有 token，用 done 中的 answer
+                        if (!fullAnswer && payload.answer) {
+                            fullAnswer = payload.answer;
+                            if (msgDiv) {
+                                try {
+                                    msgDiv.querySelector('.message-content').innerHTML = renderMarkdown(fullAnswer);
+                                } catch (renderErr) {
+                                    console.warn('JD 分析 done Markdown 渲染异常，降级为纯文本:', renderErr);
+                                    msgDiv.querySelector('.message-content').innerHTML = '<p>' + escapeHtml(fullAnswer) + '</p>';
+                                }
+                            }
+                        }
+                        setStatus('就绪', 'ready');
+
+                    } else if (payload.type === 'error') {
+                        removeTypingIndicator();
+                        appendMessage('ai', `❌ ${payload.message}`);
+                        setStatus('错误', 'error');
+                    }
+                } catch (parseErr) {
+                    console.warn('JD 分析 SSE 解析失败:', parseErr, line);
+                }
+            }
+        }
+
+        // 如果全程没有收到 extracted 事件，确保移除 typing
+        removeTypingIndicator();
+        if (!fullAnswer) {
+            appendMessage('ai', '❌ JD 分析未返回结果');
+            setStatus('错误', 'error');
+        }
     } catch (err) {
         removeTypingIndicator();
         appendMessage('ai', `❌ 网络错误：${err.message}`);

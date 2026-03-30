@@ -1,5 +1,5 @@
 """
-文件导入路由 - POST /ingest/file
+文件导入路由 - POST /ingest/file / DELETE /ingest/file/{filename}
 处理流程：上传文件 → 分类 → 加载 → 分块 → embed → 入库
 """
 from __future__ import annotations
@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.core.logger import setup_logger
@@ -149,3 +150,59 @@ async def ingest_file(file: UploadFile):
 async def list_files():
     """返回已上传的文件列表"""
     return {"files": _ingested_files}
+
+
+@router.get("/sources")
+async def list_sources():
+    """
+    返回知识库向量存储中所有不重复的来源文件名。
+    用于查看实际入库了哪些文件，可用于删除时参考。
+    """
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="向量存储未初始化")
+
+    sources = vector_store.get_sources()
+    return {"sources": sources}
+
+
+@router.delete("/file/{filename}")
+async def delete_file(filename: str):
+    """
+    从知识库中删除指定来源的所有向量记录。
+
+    Args:
+        filename: 要删除的来源文件名（与上传时的原始文件名匹配）
+
+    Returns:
+        删除结果信息
+    """
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="向量存储未初始化")
+
+    if not filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    try:
+        deleted_count = vector_store.delete_by_source(filename)
+    except Exception as e:
+        logger.error("删除文件失败: %s - %s", filename, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+    if deleted_count == 0:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "message": f"未找到来源为 '{filename}' 的记录",
+                "deleted": 0,
+            },
+        )
+
+    # 同步清理内存中的文件清单（用 in-place 修改，不替换引用）
+    global _ingested_files
+    _ingested_files = [f for f in _ingested_files if f.get("name") != filename]
+
+    logger.info("删除知识库文件完成: %s, 删除 %d 条记录", filename, deleted_count)
+    return {
+        "message": f"已删除来源 '{filename}' 的所有记录",
+        "deleted": deleted_count,
+    }

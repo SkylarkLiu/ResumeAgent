@@ -11,18 +11,26 @@ Agent API 路由 - /agent/chat + /agent/session + /agent/resume-analysis + /agen
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import re
 import uuid
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
+from app.agent.nodes.analyze_jd import analyze_jd_stream
+from app.agent.nodes.extract_jd import extract_jd
+from app.agent.nodes.extract_resume import extract_resume
 from app.agent.nodes.generate import generate_stream
+from app.agent.nodes.generate_analysis import generate_analysis_stream
 from app.agent.nodes.kb_search import search_kb
 from app.agent.nodes.normalize import normalize_kb, normalize_web
+from app.agent.nodes.retrieve_jd import retrieve_jd
 from app.agent.nodes.router import route_query
 from app.agent.nodes.web_search import search_web
 from app.core.config import get_settings
@@ -62,6 +70,15 @@ def set_checkpointer(checkpointer) -> None:
 
 # ---- 工具函数 ----
 
+# 匹配 SSE 不安全的控制字符（保留普通空白：空格、普通换行、制表）
+_SSE_UNSAFE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize_sse_content(text: str) -> str:
+    """清理 SSE payload 中的不安全控制字符，防止前端解析异常。"""
+    return _SSE_UNSAFE_RE.sub("", text)
+
+
 def _ensure_session(session_id: str) -> str:
     """确保 session_id 有效，为空时生成新的"""
     sid = session_id.strip()
@@ -84,41 +101,89 @@ def _build_sources(context_sources: list[dict]) -> list[AgentSourceItem]:
     ]
 
 
-async def _invoke_resume_analysis(
+async def _resume_stream_event_generator(
     resume_data: dict,
     question: str,
     session_id: str,
-) -> ResumeAnalysisResponse:
-    """执行简历分析图调用"""
-    config = {"configurable": {"thread_id": session_id}}
+) -> AsyncGenerator[str, None]:
+    """
+    简历分析流式事件生成器。
 
-    input_state = {
-        "messages": [HumanMessage(content=question)],
-        "context_sources": [],
-        "working_context": "",
-        "final_answer": "",
-        "resume_data": resume_data,
-    }
+    手动编排节点调用：extract_resume → retrieve_jd → generate_analysis_stream
 
-    result = await _agent_graph.ainvoke(input_state, config=config)
+    SSE 事件格式：
+    - data: {"type": "extracted", "resume_data": {...}}   - 简历提取完成
+    - data: {"type": "sources", "sources": [...]}          - JD 来源
+    - data: {"type": "token", "content": "..."}            - 增量文本
+    - data: {"type": "done", "session_id": "...", "resume_data": {...}} - 完成
+    - data: {"type": "error", "message": "..."}            - 错误
+    """
+    try:
+        input_state = {
+            "messages": [HumanMessage(content=question)],
+            "context_sources": [],
+            "working_context": "",
+            "final_answer": "",
+            "resume_data": resume_data,
+        }
 
-    answer = result.get("final_answer", "")
-    extracted_resume = result.get("resume_data", {})
-    context_sources = result.get("context_sources", [])
+        # === 阶段 1: 提取简历 ===
+        logger.info("简历分析流式: 开始提取简历...")
+        extract_result = await asyncio.to_thread(extract_resume, input_state)
+        extracted_resume = extract_result.get("resume_data", resume_data)
 
-    logger.info(
-        "简历分析完成: session=%s, answer=%d字符, sources=%d条",
-        session_id,
-        len(answer),
-        len(context_sources),
-    )
+        # 发送提取结果
+        resume_summary = {k: v for k, v in extracted_resume.items() if k != "raw_text"}
+        yield f"data: {json.dumps({'type': 'extracted', 'resume_data': resume_summary})}\n\n"
 
-    return ResumeAnalysisResponse(
-        answer=answer,
-        resume_data={k: v for k, v in extracted_resume.items() if k != "raw_text"},
-        sources=_build_sources(context_sources),
-        session_id=session_id,
-    )
+        if extracted_resume.get("extract_error"):
+            error_msg = extracted_resume["extract_error"]
+            error_answer = f"❌ 简历解析失败：{error_msg}\n\n请尝试：\n1. 重新上传简历文件\n2. 将简历内容粘贴到输入框中"
+            yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'answer': error_answer, 'resume_data': resume_summary})}\n\n"
+            return
+
+        # === 阶段 2: 检索 JD ===
+        logger.info("简历分析流式: 开始检索 JD...")
+        retrieve_state = {**input_state, **extract_result}
+        retrieve_result = await asyncio.to_thread(retrieve_jd, retrieve_state)
+        context_sources = retrieve_result.get("context_sources", [])
+
+        sources_api = _build_sources(context_sources)
+        yield f"data: {json.dumps({'type': 'sources', 'sources': [s.model_dump() for s in sources_api]})}\n\n"
+
+        # === 阶段 3: 流式生成分析报告 ===
+        logger.info("简历分析流式: 开始生成分析报告...")
+        gen_state = {**retrieve_result}
+
+        final_answer = ""
+        async for event in generate_analysis_stream(gen_state):
+            if event["type"] == "token":
+                yield f"data: {json.dumps({'type': 'token', 'content': _sanitize_sse_content(event['content'])})}\n\n"
+            elif event["type"] == "done":
+                final_answer = event.get("final_answer", "")
+            elif event["type"] == "error":
+                yield f"data: {json.dumps({'type': 'error', 'message': event['message']})}\n\n"
+
+        # === 阶段 4: 更新 checkpointer ===
+        if _agent_graph:
+            try:
+                config = {"configurable": {"thread_id": session_id}}
+                ai_message = AIMessage(content=final_answer)
+                current_message = HumanMessage(content=question)
+                _agent_graph.update_state(
+                    config,
+                    {"messages": [current_message, ai_message]},
+                )
+                logger.info("简历分析: 已更新 checkpointer, thread=%s", session_id)
+            except Exception as update_err:
+                logger.error("简历分析: 更新 checkpointer 失败: %s", update_err, exc_info=True)
+
+        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'answer': final_answer, 'resume_data': resume_summary})}\n\n"
+        logger.info("简历分析流式完成: session=%s, answer=%d字符", session_id, len(final_answer))
+
+    except Exception as e:
+        logger.error("简历分析流式异常: %s", e, exc_info=True)
+        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
 
 # ---- 原有接口 ----
@@ -308,7 +373,7 @@ async def agent_chat_stream(request: AgentChatRequest):
             ai_message = None
             async for event in generate_stream(gen_state):
                 if event["type"] == "token":
-                    yield f"data: {json.dumps({'type': 'token', 'content': event['content']})}\n\n"
+                    yield f"data: {json.dumps({'type': 'token', 'content': _sanitize_sse_content(event['content'])})}\n\n"
                 elif event["type"] == "done":
                     final_answer = event.get("final_answer", "")
                     ai_message = event["messages"][0] if event.get("messages") else None
@@ -364,28 +429,31 @@ async def agent_chat_stream(request: AgentChatRequest):
     )
 
 
-# ---- 简历分析接口 ----
+# ---- 简历分析接口（流式 SSE） ----
 
-@router.post("/resume-analysis", response_model=ResumeAnalysisResponse)
+@router.post("/resume-analysis")
 async def resume_analysis_text(request: ResumeAnalysisRequest):
     """
-    简历分析接口（文本粘贴方式）。
+    简历分析接口（文本粘贴方式）- SSE 流式输出。
 
-    用户直接粘贴简历文本，后端提取 → 检索 JD → 生成分析报告。
+    用户直接粘贴简历文本，后端提取 → 检索 JD → 流式生成分析报告。
+
+    SSE 事件格式：
+    - data: {"type": "extracted", "resume_data": {...}}   - 简历提取完成
+    - data: {"type": "sources", "sources": [...]}          - JD 来源
+    - data: {"type": "token", "content": "..."}            - 增量文本
+    - data: {"type": "done", "session_id": "...", "answer": "...", "resume_data": {...}}
+    - data: {"type": "error", "message": "..."}
     """
     if _agent_graph is None:
-        return ResumeAnalysisResponse(
-            answer="Agent 服务未初始化，请检查服务启动日志。",
-            resume_data={},
-            session_id=request.session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Agent 服务未初始化，请检查服务启动日志。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     if not request.resume_text.strip():
-        return ResumeAnalysisResponse(
-            answer="请提供简历文本内容。",
-            resume_data={},
-            session_id=request.session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': '请提供简历文本内容。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     session_id = _ensure_session(request.session_id)
 
@@ -394,18 +462,18 @@ async def resume_analysis_text(request: ResumeAnalysisRequest):
         "target_position": request.target_position.strip(),
     }
 
-    try:
-        return await _invoke_resume_analysis(resume_data, request.question, session_id)
-    except Exception as e:
-        logger.error("简历分析异常: %s", e, exc_info=True)
-        return ResumeAnalysisResponse(
-            answer=f"简历分析出错：{e}",
-            resume_data={},
-            session_id=session_id,
-        )
+    return StreamingResponse(
+        _resume_stream_event_generator(resume_data, request.question, session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
-@router.post("/resume-upload", response_model=ResumeAnalysisResponse)
+@router.post("/resume-upload")
 async def resume_analysis_upload(
     file: UploadFile = File(..., description="简历文件（PDF/图片/文本）"),
     question: str = Form(default="请对我的简历进行全面分析评估", description="分析要求"),
@@ -413,17 +481,15 @@ async def resume_analysis_upload(
     target_position: str = Form(default="", description="目标岗位"),
 ):
     """
-    简历分析接口（文件上传方式）。
+    简历分析接口（文件上传方式）- SSE 流式输出。
 
     支持上传 PDF、图片（PNG/JPG）、文本文件。
     文件在内存中处理，不做持久化存储。
     """
     if _agent_graph is None:
-        return ResumeAnalysisResponse(
-            answer="Agent 服务未初始化，请检查服务启动日志。",
-            resume_data={},
-            session_id=session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Agent 服务未初始化，请检查服务启动日志。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     # 校验文件类型
     allowed_ext = {".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md"}
@@ -431,27 +497,22 @@ async def resume_analysis_upload(
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
     if ext not in allowed_ext:
-        return ResumeAnalysisResponse(
-            answer=f"不支持的文件格式：{ext}。请上传 PDF、图片或文本文件。",
-            resume_data={},
-            session_id=session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': f'不支持的文件格式：{ext}。请上传 PDF、图片或文本文件。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     # 校验文件大小
     content = await file.read()
     max_size = settings.max_upload_size_mb * 1024 * 1024
     if len(content) > max_size:
-        return ResumeAnalysisResponse(
-            answer=f"文件过大（{len(content) / 1024 / 1024:.1f}MB），最大支持 {settings.max_upload_size_mb}MB。",
-            resume_data={},
-            session_id=session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': f'文件过大（{len(content) / 1024 / 1024:.1f}MB），最大支持 {settings.max_upload_size_mb}MB。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     session_id = _ensure_session(session_id)
 
     # 根据文件类型构建 resume_data
     if ext in (".txt", ".md"):
-        # 文本文件直接读取
         try:
             raw_text = content.decode("utf-8")
         except UnicodeDecodeError:
@@ -461,14 +522,12 @@ async def resume_analysis_upload(
             "target_position": target_position.strip(),
         }
     elif ext in (".png", ".jpg", ".jpeg"):
-        # 图片文件转 base64，由 extract_resume 节点走视觉模型
         b64 = base64.b64encode(content).decode("utf-8")
         resume_data = {
             "file_base64": b64,
             "target_position": target_position.strip(),
         }
     else:
-        # PDF：写入临时文件，由 extract_resume 节点处理
         import tempfile
         import os
 
@@ -481,75 +540,119 @@ async def resume_analysis_upload(
             "target_position": target_position.strip(),
         }
 
-    try:
-        return await _invoke_resume_analysis(resume_data, question, session_id)
-    except Exception as e:
-        logger.error("简历分析异常: %s", e, exc_info=True)
-        return ResumeAnalysisResponse(
-            answer=f"简历分析出错：{e}",
-            resume_data={},
-            session_id=session_id,
-        )
+    return StreamingResponse(
+        _resume_stream_event_generator(resume_data, question, session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ---- JD 分析接口 ----
 
-async def _invoke_jd_analysis(
+async def _jd_stream_event_generator(
     jd_data: dict,
     question: str,
     session_id: str,
-) -> JDAnalysisResponse:
-    """执行 JD 分析图调用"""
-    config = {"configurable": {"thread_id": session_id}}
+) -> AsyncGenerator[str, None]:
+    """
+    JD 分析流式事件生成器。
 
-    input_state = {
-        "messages": [HumanMessage(content=question)],
-        "context_sources": [],
-        "working_context": "",
-        "final_answer": "",
-        "jd_data": jd_data,
-    }
+    手动编排节点调用：extract_jd → analyze_jd_stream
 
-    result = await _agent_graph.ainvoke(input_state, config=config)
+    SSE 事件格式：
+    - data: {"type": "extracted", "jd_data": {...}}       - JD 提取完成
+    - data: {"type": "token", "content": "..."}            - 增量文本
+    - data: {"type": "done", "session_id": "...", "answer": "...", "jd_data": {...}}
+    - data: {"type": "error", "message": "..."}
+    """
+    try:
+        input_state = {
+            "messages": [HumanMessage(content=question)],
+            "context_sources": [],
+            "working_context": "",
+            "final_answer": "",
+            "jd_data": jd_data,
+        }
 
-    answer = result.get("final_answer", "")
-    extracted_jd = result.get("jd_data", {})
+        # === 阶段 1: 提取 JD ===
+        logger.info("JD 分析流式: 开始提取 JD...")
+        extract_result = await asyncio.to_thread(extract_jd, input_state)
+        extracted_jd = extract_result.get("jd_data", jd_data)
 
-    logger.info(
-        "JD 分析完成: session=%s, answer=%d字符, position=%s",
-        session_id,
-        len(answer),
-        extracted_jd.get("position", "未知"),
-    )
+        # 发送提取结果
+        jd_summary = {k: v for k, v in extracted_jd.items() if k not in ("raw_text",)}
+        yield f"data: {json.dumps({'type': 'extracted', 'jd_data': jd_summary})}\n\n"
 
-    return JDAnalysisResponse(
-        answer=answer,
-        jd_data={k: v for k, v in extracted_jd.items() if k not in ("raw_text",)},
-        session_id=session_id,
-    )
+        if extracted_jd.get("extract_error"):
+            error_msg = extracted_jd["extract_error"]
+            error_answer = f"❌ JD 解析失败：{error_msg}\n\n请尝试：\n1. 重新粘贴 JD 内容\n2. 确保包含完整的岗位描述信息"
+            yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'answer': error_answer, 'jd_data': jd_summary})}\n\n"
+            return
+
+        # === 阶段 2: 流式生成分析报告 ===
+        logger.info("JD 分析流式: 开始生成分析报告...")
+        gen_state = {**input_state, **extract_result}
+
+        final_answer = ""
+        async for event in analyze_jd_stream(gen_state):
+            if event["type"] == "token":
+                yield f"data: {json.dumps({'type': 'token', 'content': _sanitize_sse_content(event['content'])})}\n\n"
+            elif event["type"] == "done":
+                final_answer = event.get("final_answer", "")
+            elif event["type"] == "error":
+                yield f"data: {json.dumps({'type': 'error', 'message': event['message']})}\n\n"
+
+        # === 阶段 3: 更新 checkpointer ===
+        if _agent_graph:
+            try:
+                config = {"configurable": {"thread_id": session_id}}
+                ai_message = AIMessage(content=final_answer)
+                current_message = HumanMessage(content=question)
+                _agent_graph.update_state(
+                    config,
+                    {"messages": [current_message, ai_message]},
+                )
+                logger.info("JD 分析: 已更新 checkpointer, thread=%s", session_id)
+            except Exception as update_err:
+                logger.error("JD 分析: 更新 checkpointer 失败: %s", update_err, exc_info=True)
+
+        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'answer': final_answer, 'jd_data': jd_summary})}\n\n"
+        logger.info("JD 分析流式完成: session=%s, answer=%d字符", session_id, len(final_answer))
+
+    except Exception as e:
+        logger.error("JD 分析流式异常: %s", e, exc_info=True)
+        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
 
-@router.post("/jd-analysis", response_model=JDAnalysisResponse)
+# ---- JD 分析接口（流式 SSE） ----
+
+@router.post("/jd-analysis")
 async def jd_analysis_text(request: JDAnalysisRequest):
     """
-    JD 分析接口（文本粘贴方式）。
+    JD 分析接口（文本粘贴方式）- SSE 流式输出。
 
-    用户直接粘贴 JD 文本，后端提取 → 分析 → 返回岗位解读 + 简历写作建议。
+    用户直接粘贴 JD 文本，后端提取 → 流式生成岗位解读 + 简历写作建议。
     JD 数据自动存入 session state，后续同一 session 的简历分析将使用真实 JD。
+
+    SSE 事件格式：
+    - data: {"type": "extracted", "jd_data": {...}}
+    - data: {"type": "token", "content": "..."}
+    - data: {"type": "done", "session_id": "...", "answer": "...", "jd_data": {...}}
+    - data: {"type": "error", "message": "..."}
     """
     if _agent_graph is None:
-        return JDAnalysisResponse(
-            answer="Agent 服务未初始化，请检查服务启动日志。",
-            jd_data={},
-            session_id=request.session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Agent 服务未初始化，请检查服务启动日志。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     if not request.jd_text.strip():
-        return JDAnalysisResponse(
-            answer="请提供 JD 岗位描述文本内容。",
-            jd_data={},
-            session_id=request.session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': '请提供 JD 岗位描述文本内容。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     session_id = _ensure_session(request.session_id)
 
@@ -557,34 +660,32 @@ async def jd_analysis_text(request: JDAnalysisRequest):
         "raw_text": request.jd_text.strip(),
     }
 
-    try:
-        return await _invoke_jd_analysis(jd_data, request.question, session_id)
-    except Exception as e:
-        logger.error("JD 分析异常: %s", e, exc_info=True)
-        return JDAnalysisResponse(
-            answer=f"JD 分析出错：{e}",
-            jd_data={},
-            session_id=session_id,
-        )
+    return StreamingResponse(
+        _jd_stream_event_generator(jd_data, request.question, session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
-@router.post("/jd-upload", response_model=JDAnalysisResponse)
+@router.post("/jd-upload")
 async def jd_analysis_upload(
     file: UploadFile = File(..., description="JD 文件（PDF/图片/文本）"),
     question: str = Form(default="请分析该岗位的核心要求并给出简历写作建议", description="分析要求"),
     session_id: str = Form(default="", description="会话 ID"),
 ):
     """
-    JD 分析接口（文件上传方式）。
+    JD 分析接口（文件上传方式）- SSE 流式输出。
 
     支持上传 PDF、图片（PNG/JPG）、文本文件。
     """
     if _agent_graph is None:
-        return JDAnalysisResponse(
-            answer="Agent 服务未初始化，请检查服务启动日志。",
-            jd_data={},
-            session_id=session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Agent 服务未初始化，请检查服务启动日志。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     # 校验文件类型
     allowed_ext = {".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md"}
@@ -592,21 +693,17 @@ async def jd_analysis_upload(
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
     if ext not in allowed_ext:
-        return JDAnalysisResponse(
-            answer=f"不支持的文件格式：{ext}。请上传 PDF、图片或文本文件。",
-            jd_data={},
-            session_id=session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': f'不支持的文件格式：{ext}。请上传 PDF、图片或文本文件。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     # 校验文件大小
     content = await file.read()
     max_size = settings.max_upload_size_mb * 1024 * 1024
     if len(content) > max_size:
-        return JDAnalysisResponse(
-            answer=f"文件过大（{len(content) / 1024 / 1024:.1f}MB），最大支持 {settings.max_upload_size_mb}MB。",
-            jd_data={},
-            session_id=session_id,
-        )
+        async def error_gen():
+            yield f"data: {json.dumps({'type': 'error', 'message': f'文件过大（{len(content) / 1024 / 1024:.1f}MB），最大支持 {settings.max_upload_size_mb}MB。'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     session_id = _ensure_session(session_id)
 
@@ -619,7 +716,6 @@ async def jd_analysis_upload(
         jd_data = {"raw_text": raw_text}
     elif ext in (".png", ".jpg", ".jpeg"):
         b64 = base64.b64encode(content).decode("utf-8")
-        # 图片走视觉 OCR 提取（复用 extract_resume 的图片处理逻辑）
         jd_data = {"raw_text": "", "file_base64": b64, "is_image": True}
     else:
         import os
@@ -631,41 +727,37 @@ async def jd_analysis_upload(
             f.write(content)
         jd_data = {"raw_text": "", "file_path": tmp_path, "is_file": True}
 
-    try:
-        # 对于图片/PDF，需要先提取文本再走 JD 分析
-        if jd_data.get("is_image"):
-            from app.agent.nodes.extract_resume import _extract_from_image_base64
-            raw_text = _extract_from_image_base64(jd_data["file_base64"])
-            if raw_text:
-                jd_data["raw_text"] = raw_text
-                del jd_data["file_base64"]
-            else:
-                return JDAnalysisResponse(
-                    answer="图片 JD 文本提取失败，请尝试粘贴 JD 文本或上传 PDF/文本文件。",
-                    jd_data={},
-                    session_id=session_id,
-                )
-        elif jd_data.get("is_file"):
-            from app.agent.nodes.extract_resume import _extract_from_file
-            raw_text = _extract_from_file(jd_data["file_path"])
-            if raw_text:
-                jd_data["raw_text"] = raw_text
-                del jd_data["file_path"]
-            else:
-                return JDAnalysisResponse(
-                    answer="文件 JD 文本提取失败，请尝试粘贴 JD 文本或上传其他格式文件。",
-                    jd_data={},
-                    session_id=session_id,
-                )
+    # 对于图片/PDF，需要先提取文本再走 JD 分析
+    if jd_data.get("is_image"):
+        from app.agent.nodes.extract_resume import _extract_from_image_base64
+        raw_text = _extract_from_image_base64(jd_data["file_base64"])
+        if raw_text:
+            jd_data["raw_text"] = raw_text
+            del jd_data["file_base64"]
+        else:
+            async def error_gen():
+                yield f"data: {json.dumps({'type': 'error', 'message': '图片 JD 文本提取失败，请尝试粘贴 JD 文本或上传 PDF/文本文件。'})}\n\n"
+            return StreamingResponse(error_gen(), media_type="text/event-stream")
+    elif jd_data.get("is_file"):
+        from app.agent.nodes.extract_resume import _extract_from_file
+        raw_text = _extract_from_file(jd_data["file_path"])
+        if raw_text:
+            jd_data["raw_text"] = raw_text
+            del jd_data["file_path"]
+        else:
+            async def error_gen():
+                yield f"data: {json.dumps({'type': 'error', 'message': '文件 JD 文本提取失败，请尝试粘贴 JD 文本或上传其他格式文件。'})}\n\n"
+            return StreamingResponse(error_gen(), media_type="text/event-stream")
 
-        return await _invoke_jd_analysis(jd_data, question, session_id)
-    except Exception as e:
-        logger.error("JD 分析异常: %s", e, exc_info=True)
-        return JDAnalysisResponse(
-            answer=f"JD 分析出错：{e}",
-            jd_data={},
-            session_id=session_id,
-        )
+    return StreamingResponse(
+        _jd_stream_event_generator(jd_data, question, session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ---- 会话管理接口 ----
