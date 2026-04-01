@@ -15,32 +15,40 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from app.agent.nodes.extract_resume import extract_resume
-from app.agent.nodes.analyze_jd import analyze_jd
-from app.agent.nodes.extract_jd import extract_jd
-from app.agent.nodes.generate import generate, set_max_history
-from app.agent.nodes.generate_analysis import generate_analysis
+from app.agent.nodes.generate import generate_streaming_node, set_max_history
 from app.agent.nodes.kb_search import search_kb, set_retrieval_service
 from app.agent.nodes.normalize import normalize_kb, normalize_web, set_max_chars
-from app.agent.nodes.retrieve_jd import retrieve_jd, set_retrieval_service_jd
+from app.agent.nodes.retrieve_jd import set_retrieval_service_jd
 from app.agent.nodes.router import route_query
 from app.agent.nodes.web_search import search_web, set_web_search_service
 from app.agent.state import AgentState, RouteType, TaskType
+from app.agent.subgraphs import build_jd_analysis_subgraph, build_resume_analysis_subgraph
 from app.core.logger import setup_logger
 
 logger = setup_logger("agent.graph")
 
 # 全局 checkpointer（进程内内存，跨请求持久化 thread state）
 _checkpointer = MemorySaver()
+_resume_analysis_subgraph = None
+_jd_analysis_subgraph = None
 
 
 def get_checkpointer() -> MemorySaver:
     """获取全局 checkpointer 实例（供 API 层直接调用 get_state）"""
     return _checkpointer
+
+
+def get_resume_analysis_subgraph():
+    """获取已编译的简历分析子图。"""
+    return _resume_analysis_subgraph
+
+
+def get_jd_analysis_subgraph():
+    """获取已编译的 JD 分析子图。"""
+    return _jd_analysis_subgraph
 
 
 def _route_decision(state: AgentState) -> str:
@@ -100,7 +108,11 @@ def build_agent_graph(
     set_max_history(settings.agent_max_history)
     set_max_chars(settings.web_search_result_max_chars)
 
+    global _resume_analysis_subgraph, _jd_analysis_subgraph
+
     web_available = web_search_service.is_available
+    _resume_analysis_subgraph = build_resume_analysis_subgraph()
+    _jd_analysis_subgraph = build_jd_analysis_subgraph()
 
     # ---- 构建图 ----
     builder = StateGraph(AgentState)
@@ -111,16 +123,11 @@ def build_agent_graph(
     builder.add_node("search_web", search_web)
     builder.add_node("normalize_kb", normalize_kb)
     builder.add_node("normalize_web", normalize_web)
-    builder.add_node("generate", generate)
+    builder.add_node("generate", generate_streaming_node)
 
-    # 简历分析子图节点
-    builder.add_node("extract_resume", extract_resume)
-    builder.add_node("retrieve_jd", retrieve_jd)
-    builder.add_node("generate_analysis", generate_analysis)
-
-    # JD 分析子图节点
-    builder.add_node("extract_jd", extract_jd)
-    builder.add_node("analyze_jd", analyze_jd)
+    # 分析子图节点
+    builder.add_node("resume_analysis", _resume_analysis_subgraph)
+    builder.add_node("jd_analysis", _jd_analysis_subgraph)
 
     # 添加边
     builder.add_edge(START, "router")
@@ -130,8 +137,8 @@ def build_agent_graph(
         "router",
         _route_decision,
         {
-            "resume_analysis": "extract_resume",
-            "jd_analysis": "extract_jd",
+            "resume_analysis": "resume_analysis",
+            "jd_analysis": "jd_analysis",
             "retrieve": "search_kb",
             "web": "search_web",
             "direct": "generate",
@@ -146,17 +153,10 @@ def build_agent_graph(
     builder.add_edge("search_web", "normalize_web")
     builder.add_edge("normalize_web", "generate")
 
-    # 简历分析子图路径：extract → retrieve → generate_analysis
-    builder.add_edge("extract_resume", "retrieve_jd")
-    builder.add_edge("retrieve_jd", "generate_analysis")
-
-    # JD 分析子图路径：extract_jd → analyze_jd
-    builder.add_edge("extract_jd", "analyze_jd")
-
     # 三条路径都汇入 END
     builder.add_edge("generate", END)
-    builder.add_edge("generate_analysis", END)
-    builder.add_edge("analyze_jd", END)
+    builder.add_edge("resume_analysis", END)
+    builder.add_edge("jd_analysis", END)
 
     # 编译（注入 checkpointer 实现 thread 持久化）
     graph = builder.compile(checkpointer=_checkpointer)

@@ -22,9 +22,10 @@ ROUTER_SYSTEM_PROMPT = """你是一个意图路由器。根据用户的问题和
 同时判断任务类型：
 - **qa**：普通问答
 - **resume_analysis**：用户提供简历内容，希望得到分析、评分或优化建议
+- **jd_analysis**：用户提供岗位描述，希望拆解岗位要求并获得简历写作建议
 
 请以 JSON 格式输出，不要输出任何其他内容：
-{"reasoning": "简要判断理由", "route_type": "retrieve|web|direct", "task_type": "qa|resume_analysis"}"""
+{"reasoning": "简要判断理由", "route_type": "retrieve|web|direct", "task_type": "qa|resume_analysis|jd_analysis"}"""
 
 # ---- Agent 生成 prompt ----
 AGENT_SYSTEM_PROMPT = """你是一个专业的文档问答助手。请基于提供的参考内容来回答用户问题。
