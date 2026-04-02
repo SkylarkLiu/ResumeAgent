@@ -170,14 +170,34 @@ ResumeAgent/
 TAVILY_API_KEY=your_tavily_key_here
 ```
 
-## Docker 部署与持久化
+## 部署到服务器
 
-生产环境建议把持久化拆成两层：
+这一节给出一套从本地验证到服务器上线的完整路径，目标是确保两类数据都能持久化：
 
-- **PostgreSQL**：保存 LangGraph checkpointer，会话与线程状态跨容器重启保留
-- **Docker Volume**：挂载 `data/faiss_index` 和 `data/raw`，保证知识库索引与原始文件不丢失
+- **会话状态**：由 PostgreSQL 保存 LangGraph checkpointer
+- **知识库数据**：由 Docker volume 保存 `data/faiss_index` 和 `data/raw`
+
+### 持久化设计
+
+当前项目采用两层持久化：
+
+1. **PostgreSQL**
+   用于保存多轮对话状态、session/thread checkpoint、分析链路中的中间状态。
+
+2. **文件卷**
+   用于保存：
+   - `data/faiss_index`：FAISS 向量索引
+   - `data/raw`：知识库原始文件
+
+这样即使 `app` 容器重建，以下数据仍然保留：
+
+- 已上传知识库
+- 向量索引
+- 用户历史会话
 
 ### 关键环境变量
+
+至少配置以下变量：
 
 ```env
 ZHIPUAI_API_KEY=your_zhipu_api_key_here
@@ -185,7 +205,13 @@ TAVILY_API_KEY=your_tavily_key_here
 CHECKPOINT_DB_URL=postgresql://resumeagent:password@postgres:5432/resumeagent?sslmode=disable
 ```
 
-### 启动方式
+对应模板可参考 [.env.example](/Users/superskylark/myproject/ResumeAgent/.env.example)。
+
+### 本地容器验证
+
+第一次建议先在本机验证，确认持久化链路正常后再上服务器。
+
+#### 1. 启动服务
 
 项目已提供 [docker-compose.yml](/Users/superskylark/myproject/ResumeAgent/docker-compose.yml)：
 
@@ -198,21 +224,194 @@ docker compose up -d --build
 - `app`：FastAPI + LangGraph 应用
 - `postgres`：会话持久化数据库
 
-并挂载以下持久化目录：
+#### 2. 检查容器状态
 
-- `./data/faiss_index -> /app/data/faiss_index`
-- `./data/raw -> /app/data/raw`
-- `postgres_data -> PostgreSQL 数据目录`
+```bash
+docker compose ps
+```
 
-### 健康检查
+期望看到：
 
-启动后可访问：
+- `resumeagent-app` 为 `Up`
+- `resumeagent-postgres` 为 `Up (healthy)`
+
+#### 3. 健康检查
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-返回中会包含 `checkpointer_backend`，用于确认当前是否已切到 `postgres`。
+返回中应包含：
+
+```json
+{
+  "status": "ok",
+  "checkpointer_backend": "postgres"
+}
+```
+
+如果这里还是 `memory`，说明 `CHECKPOINT_DB_URL` 没生效，或者 PostgreSQL checkpointer 没成功初始化。
+
+#### 4. 验证会话持久化
+
+先发起一次对话：
+
+```bash
+curl -X POST http://localhost:8000/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question":"请记住这条测试信息：火龙果-持久化验证。只需简单回复已记住。","session_id":""}'
+```
+
+记录返回中的 `session_id`，然后查询会话：
+
+```bash
+curl http://localhost:8000/agent/session/<session_id>
+```
+
+再重启应用容器：
+
+```bash
+docker compose restart app
+```
+
+重启后再次查询：
+
+```bash
+curl http://localhost:8000/agent/session/<session_id>
+```
+
+如果 `message_count` 没掉，说明 PostgreSQL 持久化已生效。
+
+最后再追问一次：
+
+```bash
+curl -X POST http://localhost:8000/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question":"我刚刚让你记住了什么？只回答那条内容本身。","session_id":"<session_id>"}'
+```
+
+如果能回答出之前的内容，说明“容器重启后上下文仍可恢复”。
+
+#### 5. 验证知识库持久化
+
+上传文档到知识库后，确认以下目录已产生数据：
+
+- `./data/faiss_index`
+- `./data/raw`
+
+然后执行：
+
+```bash
+docker compose restart app
+```
+
+重启后访问系统并确认知识库仍可使用，即可判定文件卷持久化正常。
+
+### 服务器部署步骤
+
+当本地验证通过后，再部署到服务器：
+
+#### 1. 安装基础环境
+
+服务器需要具备：
+
+- Docker
+- Docker Compose
+- 可访问智谱 API 的网络环境
+
+#### 2. 拉取代码并配置环境变量
+
+```bash
+git clone https://github.com/SkylarkLiu/ResumeAgent.git
+cd ResumeAgent
+cp .env.example .env
+```
+
+编辑 `.env`，至少填写：
+
+- `ZHIPUAI_API_KEY`
+- `TAVILY_API_KEY`（可选）
+- `CHECKPOINT_DB_URL`
+
+#### 3. 创建数据目录
+
+建议提前创建本地目录：
+
+```bash
+mkdir -p data/faiss_index data/raw
+```
+
+#### 4. 启动服务
+
+```bash
+docker compose up -d --build
+```
+
+#### 5. 验证服务
+
+```bash
+curl http://127.0.0.1:8000/health
+docker compose ps
+docker compose logs --tail=100 app
+docker compose logs --tail=100 postgres
+```
+
+### 数据卷说明
+
+`docker-compose.yml` 中当前使用了以下持久化卷：
+
+- `./data/faiss_index -> /app/data/faiss_index`
+- `./data/raw -> /app/data/raw`
+- `postgres_data -> /var/lib/postgresql/data`
+
+含义如下：
+
+- `data/faiss_index`
+  保存 FAISS 索引和元数据，决定知识库检索能力是否可恢复
+- `data/raw`
+  保存原始知识库文件，便于重建索引或回溯来源
+- `postgres_data`
+  保存 PostgreSQL 数据库文件，决定 session/checkpoint 是否可恢复
+
+### 备份建议
+
+最低建议备份这三部分：
+
+1. `data/faiss_index`
+2. `data/raw`
+3. `postgres_data` 或 PostgreSQL 导出文件
+
+如果做服务器迁移，只要保留这三部分，通常就可以恢复：
+
+- 知识库索引
+- 原始文档
+- 历史会话状态
+
+### 常见问题
+
+#### 1. `/health` 里 `checkpointer_backend` 仍然是 `memory`
+
+通常说明：
+
+- 没配置 `CHECKPOINT_DB_URL`
+- PostgreSQL 容器没启动成功
+- `langgraph-checkpoint-postgres` 依赖没安装成功
+
+#### 2. 重启后会话丢失
+
+优先检查：
+
+- `postgres_data` 是否真的挂载
+- `CHECKPOINT_DB_URL` 是否连到了 compose 里的 `postgres`
+- PostgreSQL 容器是否被重建且没保留卷
+
+#### 3. 重启后知识库丢失
+
+优先检查：
+
+- `data/faiss_index` 是否挂载
+- `data/raw` 是否挂载
+- 是否误删本地目录
 
 ## 最近改动
 
