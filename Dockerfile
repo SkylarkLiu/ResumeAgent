@@ -5,7 +5,14 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_MIRROR=mirrors.aliyun.com
+
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i "s|http://deb.debian.org|https://${DEBIAN_MIRROR}|g; s|http://security.debian.org|https://${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+        sed -i "s|http://deb.debian.org|https://${DEBIAN_MIRROR}|g; s|http://security.debian.org|https://${DEBIAN_MIRROR}|g" /etc/apt/sources.list; \
+    fi \
+    && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
