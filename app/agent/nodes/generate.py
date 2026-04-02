@@ -62,7 +62,10 @@ def generate(state: AgentState) -> dict:
     )
 
     # 调用 LLM
-    answer = chat_completion(llm_messages)
+    answer = chat_completion(
+        llm_messages,
+        thinking={"type": "disabled"},
+    )
     logger.info("生成完成: 回答 %d 字符", len(answer))
 
     return {
@@ -153,7 +156,10 @@ async def generate_stream(state: AgentState) -> AsyncGenerator[dict[str, Any], N
     )
 
     full_answer = ""
-    async for delta in chat_completion_stream_async(llm_messages):
+    async for delta in chat_completion_stream_async(
+        llm_messages,
+        thinking={"type": "disabled"},
+    ):
         if delta:
             full_answer += delta
             yield {"type": "token", "content": delta}
