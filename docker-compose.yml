@@ -4,6 +4,7 @@ services:
       context: .
       args:
         DEBIAN_MIRROR: ${DEBIAN_MIRROR:-mirrors.aliyun.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
     container_name: resumeagent-app
     restart: unless-stopped
     env_file:
