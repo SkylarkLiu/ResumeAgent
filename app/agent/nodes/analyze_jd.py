@@ -95,6 +95,7 @@ def analyze_jd(state: AgentState) -> dict:
             llm_messages,
             temperature=0.5,
             max_tokens=4096,
+            thinking={"type": "disabled"},
         )
         logger.info("JD 分析报告生成完成: %d 字符", len(answer))
 
@@ -154,6 +155,7 @@ async def analyze_jd_stream(state: AgentState) -> AsyncGenerator[dict[str, Any],
             llm_messages,
             temperature=0.5,
             max_tokens=4096,
+            thinking={"type": "disabled"},
         ):
             if delta:
                 full_answer += delta

@@ -110,6 +110,7 @@ def generate_analysis(state: AgentState) -> dict:
             llm_messages,
             temperature=0.5,
             max_tokens=4096,
+            thinking={"type": "disabled"},
         )
         logger.info("简历分析报告生成完成: %d 字符", len(answer))
 
@@ -169,6 +170,7 @@ async def generate_analysis_stream(state: AgentState) -> AsyncGenerator[dict[str
             llm_messages,
             temperature=0.5,
             max_tokens=4096,
+            thinking={"type": "disabled"},
         ):
             if delta:
                 full_answer += delta

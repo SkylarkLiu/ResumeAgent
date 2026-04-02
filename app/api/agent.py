@@ -11,7 +11,6 @@ Agent API 路由 - /agent/chat + /agent/session + /agent/resume-analysis + /agen
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import re
@@ -23,16 +22,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agent.nodes.analyze_jd import analyze_jd_stream
-from app.agent.nodes.extract_jd import extract_jd
-from app.agent.nodes.extract_resume import extract_resume
-from app.agent.nodes.generate import generate_stream
-from app.agent.nodes.generate_analysis import generate_analysis_stream
-from app.agent.nodes.kb_search import search_kb
-from app.agent.nodes.normalize import normalize_kb, normalize_web
-from app.agent.nodes.retrieve_jd import retrieve_jd
-from app.agent.nodes.router import route_query
-from app.agent.nodes.web_search import search_web
+from app.agent import get_jd_analysis_subgraph, get_resume_analysis_subgraph
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.schemas.agent import (
@@ -101,6 +91,41 @@ def _build_sources(context_sources: list[dict]) -> list[AgentSourceItem]:
     ]
 
 
+def _sse_event(payload: dict[str, Any]) -> str:
+    """格式化 SSE data 事件。"""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _persist_analysis_state(
+    *,
+    session_id: str,
+    question: str,
+    final_answer: str,
+    ai_messages: list | None = None,
+    extra_state: dict[str, Any] | None = None,
+) -> None:
+    """把分析子图结果写回主图 checkpointer，保留消息和结构化数据。"""
+    if _agent_graph is None:
+        return
+
+    try:
+        config = {"configurable": {"thread_id": session_id}}
+        update_payload = dict(extra_state or {})
+
+        if ai_messages:
+            update_payload["messages"] = [HumanMessage(content=question), *ai_messages]
+        else:
+            update_payload["messages"] = [HumanMessage(content=question), AIMessage(content=final_answer)]
+
+        if hasattr(_agent_graph, "aupdate_state"):
+            await _agent_graph.aupdate_state(config, update_payload)
+        else:
+            _agent_graph.update_state(config, update_payload)
+        logger.info("分析结果已更新 checkpointer: thread=%s, keys=%s", session_id, list(update_payload.keys()))
+    except Exception as update_err:
+        logger.error("分析结果更新 checkpointer 失败: %s", update_err, exc_info=True)
+
+
 async def _resume_stream_event_generator(
     resume_data: dict,
     question: str,
@@ -109,7 +134,7 @@ async def _resume_stream_event_generator(
     """
     简历分析流式事件生成器。
 
-    手动编排节点调用：extract_resume → retrieve_jd → generate_analysis_stream
+    通过简历分析子图执行：extract_resume → resolve_jd_context → generate_analysis
 
     SSE 事件格式：
     - data: {"type": "extracted", "resume_data": {...}}   - 简历提取完成
@@ -119,6 +144,12 @@ async def _resume_stream_event_generator(
     - data: {"type": "error", "message": "..."}            - 错误
     """
     try:
+        subgraph = get_resume_analysis_subgraph()
+        if subgraph is None:
+            yield _sse_event({"type": "error", "message": "简历分析子图未初始化，请检查服务启动日志。"})
+            return
+
+        config = {"configurable": {"thread_id": session_id}}
         input_state = {
             "messages": [HumanMessage(content=question)],
             "context_sources": [],
@@ -127,63 +158,66 @@ async def _resume_stream_event_generator(
             "resume_data": resume_data,
         }
 
-        # === 阶段 1: 提取简历 ===
-        logger.info("简历分析流式: 开始提取简历...")
-        extract_result = await asyncio.to_thread(extract_resume, input_state)
-        extracted_resume = extract_result.get("resume_data", resume_data)
+        extracted_resume = resume_data
+        resume_summary = {k: v for k, v in resume_data.items() if k != "raw_text"}
+        context_sources: list[dict] = []
+        working_context = ""
+        final_answer = ""
+        ai_messages = None
+        error_emitted = False
 
-        # 发送提取结果
-        resume_summary = {k: v for k, v in extracted_resume.items() if k != "raw_text"}
-        yield f"data: {json.dumps({'type': 'extracted', 'resume_data': resume_summary})}\n\n"
+        async for mode, payload in subgraph.astream(
+            input_state,
+            config=config,
+            stream_mode=["custom", "updates"],
+        ):
+            if mode == "custom":
+                event_type = payload.get("type")
+                if event_type == "extracted":
+                    resume_summary = payload.get("resume_data", resume_summary)
+                    yield _sse_event({"type": "extracted", "resume_data": resume_summary})
+                elif event_type == "sources":
+                    context_sources = payload.get("sources", [])
+                    sources_api = _build_sources(context_sources)
+                    yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
+                elif event_type == "token":
+                    yield _sse_event({"type": "token", "content": _sanitize_sse_content(payload.get("content", ""))})
+                elif event_type == "error":
+                    error_emitted = True
+                    yield _sse_event({"type": "error", "message": payload.get("message", "未知错误")})
+            elif mode == "updates":
+                if "resolve_jd_context" in payload:
+                    context_sources = payload["resolve_jd_context"].get("context_sources", context_sources)
+                    working_context = payload["resolve_jd_context"].get("working_context", working_context)
+                if "generate_analysis" in payload:
+                    final_answer = payload["generate_analysis"].get("final_answer", final_answer)
+                    ai_messages = payload["generate_analysis"].get("messages")
+                if "extract_resume" in payload:
+                    extracted_resume = payload["extract_resume"].get("resume_data", extracted_resume)
 
-        if extracted_resume.get("extract_error"):
-            error_msg = extracted_resume["extract_error"]
-            error_answer = f"❌ 简历解析失败：{error_msg}\n\n请尝试：\n1. 重新上传简历文件\n2. 将简历内容粘贴到输入框中"
-            yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'answer': error_answer, 'resume_data': resume_summary})}\n\n"
+        if error_emitted:
             return
 
-        # === 阶段 2: 检索 JD ===
-        logger.info("简历分析流式: 开始检索 JD...")
-        retrieve_state = {**input_state, **extract_result}
-        retrieve_result = await asyncio.to_thread(retrieve_jd, retrieve_state)
-        context_sources = retrieve_result.get("context_sources", [])
+        await _persist_analysis_state(
+            session_id=session_id,
+            question=question,
+            final_answer=final_answer,
+            ai_messages=ai_messages,
+            extra_state={
+                "task_type": "resume_analysis",
+                "resume_data": extracted_resume,
+                "context_sources": context_sources,
+                "working_context": working_context,
+                "final_answer": final_answer,
+            },
+        )
 
-        sources_api = _build_sources(context_sources)
-        yield f"data: {json.dumps({'type': 'sources', 'sources': [s.model_dump() for s in sources_api]})}\n\n"
-
-        # === 阶段 3: 流式生成分析报告 ===
-        logger.info("简历分析流式: 开始生成分析报告...")
-        gen_state = {**retrieve_result}
-
-        final_answer = ""
-        async for event in generate_analysis_stream(gen_state):
-            if event["type"] == "token":
-                yield f"data: {json.dumps({'type': 'token', 'content': _sanitize_sse_content(event['content'])})}\n\n"
-            elif event["type"] == "done":
-                final_answer = event.get("final_answer", "")
-            elif event["type"] == "error":
-                yield f"data: {json.dumps({'type': 'error', 'message': event['message']})}\n\n"
-
-        # === 阶段 4: 更新 checkpointer ===
-        if _agent_graph:
-            try:
-                config = {"configurable": {"thread_id": session_id}}
-                ai_message = AIMessage(content=final_answer)
-                current_message = HumanMessage(content=question)
-                _agent_graph.update_state(
-                    config,
-                    {"messages": [current_message, ai_message]},
-                )
-                logger.info("简历分析: 已更新 checkpointer, thread=%s", session_id)
-            except Exception as update_err:
-                logger.error("简历分析: 更新 checkpointer 失败: %s", update_err, exc_info=True)
-
-        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'answer': final_answer, 'resume_data': resume_summary})}\n\n"
+        yield _sse_event({"type": "done", "session_id": session_id, "answer": final_answer, "resume_data": resume_summary})
         logger.info("简历分析流式完成: session=%s, answer=%d字符", session_id, len(final_answer))
 
     except Exception as e:
         logger.error("简历分析流式异常: %s", e, exc_info=True)
-        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        yield _sse_event({"type": "error", "message": str(e)})
 
 
 # ---- 原有接口 ----
@@ -261,9 +295,9 @@ async def agent_chat_stream(request: AgentChatRequest):
     Agent 多轮对话流式接口（SSE）。
 
     流程：
-    1. 执行路由决策（非流式）
-    2. 根据路由执行检索/搜索（非流式）
-    3. 流式生成回答（yield 每个 token）
+    1. 调用主图执行路由 / 检索 / 标准化 / 生成
+    2. 将图的 updates/custom 事件翻译成 SSE
+    3. checkpointer 由主图自动持久化
 
     SSE 事件格式：
     - data: {"type": "route", "route": "retrieve", "task": "qa"}
@@ -282,130 +316,62 @@ async def agent_chat_stream(request: AgentChatRequest):
 
     async def event_generator():
         try:
-            # === 阶段 1: 从 checkpointer 加载历史 ===
-            history_messages = []
-            if _checkpointer:
-                snapshot = _checkpointer.get(config)
-                if snapshot:
-                    channel_values = snapshot.get("channel_values", {})
-                    history_messages = channel_values.get("messages", [])
+            logger.info("Agent 流式请求: thread=%s, question=%s", session_id, question[:50])
 
-            logger.info(
-                "Agent 流式请求: thread=%s, question=%s, history=%d条",
-                session_id,
-                question[:50],
-                len(history_messages),
-            )
-
-            # 追加当前用户消息
-            current_message = HumanMessage(content=question)
-            messages = history_messages + [current_message]
-
-            # === 阶段 2: 路由决策 ===
-            logger.debug("执行路由决策...")
-            route_state = {
-                "messages": messages,
-                "route_type": "direct",
-                "task_type": "qa",
-            }
-            route_result = route_query(route_state)
-            route_type = route_result.get("route_type", "direct")
-            task_type = route_result.get("task_type", "qa")
-
-            route_str = route_type.value if hasattr(route_type, "value") else str(route_type)
-            task_str = task_type.value if hasattr(task_type, "value") else str(task_type)
-
-            logger.info("路由决策: route=%s, task=%s", route_str, task_str)
-            yield f"data: {json.dumps({'type': 'route', 'route': route_str, 'task': task_str})}\n\n"
-
-            # === 阶段 3: 根据路由执行检索/搜索 ===
-            context_sources = []
-            working_context = ""
-
-            if route_str == "retrieve":
-                # KB 检索
-                logger.debug("执行 KB 检索...")
-                kb_state = {
-                    "messages": messages,
-                    "route_type": route_type,
-                    "task_type": task_type,
-                    "context_sources": [],
-                    "working_context": "",
-                }
-                kb_result = search_kb(kb_state)
-                context_sources = kb_result.get("context_sources", [])
-                norm_result = normalize_kb(kb_result)
-                working_context = norm_result.get("working_context", "")
-                logger.info("KB 检索完成: %d 条结果", len(context_sources))
-
-            elif route_str == "web":
-                # Web 搜索
-                logger.debug("执行 Web 搜索...")
-                web_state = {
-                    "messages": messages,
-                    "route_type": route_type,
-                    "task_type": task_type,
-                    "context_sources": [],
-                    "working_context": "",
-                }
-                web_result = search_web(web_state)
-                context_sources = web_result.get("context_sources", [])
-                norm_result = normalize_web(web_result)
-                working_context = norm_result.get("working_context", "")
-                logger.info("Web 搜索完成: %d 条结果", len(context_sources))
-
-            # 发送 sources 事件
-            sources_api = _build_sources(context_sources)
-            yield f"data: {json.dumps({'type': 'sources', 'sources': [s.model_dump() for s in sources_api]})}\n\n"
-
-            # === 阶段 4: 流式生成 ===
-            logger.info("开始流式生成...")
-            gen_state = {
-                "messages": messages,
-                "route_type": route_type,
-                "task_type": task_type,
-                "context_sources": context_sources,
-                "working_context": working_context,
+            input_state = {
+                "messages": [HumanMessage(content=question)],
+                "context_sources": [],
+                "working_context": "",
                 "final_answer": "",
             }
 
+            route_str = "direct"
+            task_str = "qa"
             final_answer = ""
-            ai_message = None
-            async for event in generate_stream(gen_state):
-                if event["type"] == "token":
-                    yield f"data: {json.dumps({'type': 'token', 'content': _sanitize_sse_content(event['content'])})}\n\n"
-                elif event["type"] == "done":
-                    final_answer = event.get("final_answer", "")
-                    ai_message = event["messages"][0] if event.get("messages") else None
+            sources_sent = False
 
-            # === 阶段 5: 更新 checkpointer ===
-            logger.debug("阶段 5: 更新 checkpointer, graph=%s, ai_msg=%s", _agent_graph is not None, ai_message is not None)
-            if _agent_graph and ai_message:
-                # 使用 update_state 更新历史（追加消息）
-                # 注意：update_state 是同步方法，在异步上下文中直接调用
-                try:
-                    logger.debug("调用 update_state: config=%s, messages=%d", config, 2)
-                    result_config = _agent_graph.update_state(
-                        config,
-                        {"messages": [current_message, ai_message]},
-                    )
-                    logger.info("已更新 checkpointer: thread=%s, result_config=%s", session_id, result_config)
+            async for mode, payload in _agent_graph.astream(
+                input_state,
+                config=config,
+                stream_mode=["custom", "updates"],
+            ):
+                if mode == "custom":
+                    event_type = payload.get("type")
+                    if event_type == "token":
+                        yield _sse_event({"type": "token", "content": _sanitize_sse_content(payload.get("content", ""))})
+                    elif event_type == "error":
+                        yield _sse_event({"type": "error", "message": payload.get("message", "未知错误")})
+                elif mode == "updates":
+                    if "router" in payload:
+                        route_type = payload["router"].get("route_type", route_str)
+                        task_type = payload["router"].get("task_type", task_str)
+                        route_str = route_type.value if hasattr(route_type, "value") else str(route_type)
+                        task_str = task_type.value if hasattr(task_type, "value") else str(task_type)
+                        logger.info("路由决策: route=%s, task=%s", route_str, task_str)
+                        yield _sse_event({"type": "route", "route": route_str, "task": task_str})
+                        if route_str == "direct" and not sources_sent:
+                            yield _sse_event({"type": "sources", "sources": []})
+                            sources_sent = True
 
-                    # 验证是否成功
-                    verify_state = _checkpointer.get(config) if _checkpointer else None
-                    if verify_state:
-                        verify_messages = verify_state.get("channel_values", {}).get("messages", [])
-                        logger.debug("验证: checkpointer 现有 %d 条消息", len(verify_messages))
-                    else:
-                        logger.warning("验证失败: checkpointer.get() 返回 None")
+                    if "search_kb" in payload and not sources_sent:
+                        context_sources = payload["search_kb"].get("context_sources", [])
+                        sources_api = _build_sources(context_sources)
+                        yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
+                        sources_sent = True
 
-                except Exception as update_err:
-                    logger.error("更新 checkpointer 失败: %s", update_err, exc_info=True)
-            else:
-                logger.warning("跳过 checkpointer 更新: graph=%s, ai_msg=%s", _agent_graph is not None, ai_message is not None)
+                    if "search_web" in payload and not sources_sent:
+                        context_sources = payload["search_web"].get("context_sources", [])
+                        sources_api = _build_sources(context_sources)
+                        yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
+                        sources_sent = True
 
-            # 发送 done 事件
-            yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
+                    if "generate" in payload:
+                        final_answer = payload["generate"].get("final_answer", final_answer)
+
+            if not sources_sent:
+                yield _sse_event({"type": "sources", "sources": []})
+
+            yield _sse_event({"type": "done", "session_id": session_id})
 
             logger.info(
                 "Agent 流式回复完成: thread=%s, route=%s, answer=%d字符",
@@ -416,7 +382,7 @@ async def agent_chat_stream(request: AgentChatRequest):
 
         except Exception as e:
             logger.error("Agent 流式执行异常: %s", e, exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield _sse_event({"type": "error", "message": str(e)})
 
     return StreamingResponse(
         event_generator(),
@@ -561,7 +527,7 @@ async def _jd_stream_event_generator(
     """
     JD 分析流式事件生成器。
 
-    手动编排节点调用：extract_jd → analyze_jd_stream
+    通过 JD 分析子图执行：extract_jd → analyze_jd
 
     SSE 事件格式：
     - data: {"type": "extracted", "jd_data": {...}}       - JD 提取完成
@@ -570,6 +536,12 @@ async def _jd_stream_event_generator(
     - data: {"type": "error", "message": "..."}
     """
     try:
+        subgraph = get_jd_analysis_subgraph()
+        if subgraph is None:
+            yield _sse_event({"type": "error", "message": "JD 分析子图未初始化，请检查服务启动日志。"})
+            return
+
+        config = {"configurable": {"thread_id": session_id}}
         input_state = {
             "messages": [HumanMessage(content=question)],
             "context_sources": [],
@@ -578,54 +550,55 @@ async def _jd_stream_event_generator(
             "jd_data": jd_data,
         }
 
-        # === 阶段 1: 提取 JD ===
-        logger.info("JD 分析流式: 开始提取 JD...")
-        extract_result = await asyncio.to_thread(extract_jd, input_state)
-        extracted_jd = extract_result.get("jd_data", jd_data)
+        extracted_jd = jd_data
+        jd_summary = {k: v for k, v in jd_data.items() if k != "raw_text"}
+        final_answer = ""
+        ai_messages = None
+        error_emitted = False
 
-        # 发送提取结果
-        jd_summary = {k: v for k, v in extracted_jd.items() if k not in ("raw_text",)}
-        yield f"data: {json.dumps({'type': 'extracted', 'jd_data': jd_summary})}\n\n"
+        async for mode, payload in subgraph.astream(
+            input_state,
+            config=config,
+            stream_mode=["custom", "updates"],
+        ):
+            if mode == "custom":
+                event_type = payload.get("type")
+                if event_type == "extracted":
+                    jd_summary = payload.get("jd_data", jd_summary)
+                    yield _sse_event({"type": "extracted", "jd_data": jd_summary})
+                elif event_type == "token":
+                    yield _sse_event({"type": "token", "content": _sanitize_sse_content(payload.get("content", ""))})
+                elif event_type == "error":
+                    error_emitted = True
+                    yield _sse_event({"type": "error", "message": payload.get("message", "未知错误")})
+            elif mode == "updates":
+                if "extract_jd" in payload:
+                    extracted_jd = payload["extract_jd"].get("jd_data", extracted_jd)
+                if "analyze_jd" in payload:
+                    final_answer = payload["analyze_jd"].get("final_answer", final_answer)
+                    ai_messages = payload["analyze_jd"].get("messages")
 
-        if extracted_jd.get("extract_error"):
-            error_msg = extracted_jd["extract_error"]
-            error_answer = f"❌ JD 解析失败：{error_msg}\n\n请尝试：\n1. 重新粘贴 JD 内容\n2. 确保包含完整的岗位描述信息"
-            yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'answer': error_answer, 'jd_data': jd_summary})}\n\n"
+        if error_emitted:
             return
 
-        # === 阶段 2: 流式生成分析报告 ===
-        logger.info("JD 分析流式: 开始生成分析报告...")
-        gen_state = {**input_state, **extract_result}
+        await _persist_analysis_state(
+            session_id=session_id,
+            question=question,
+            final_answer=final_answer,
+            ai_messages=ai_messages,
+            extra_state={
+                "task_type": "jd_analysis",
+                "jd_data": extracted_jd,
+                "final_answer": final_answer,
+            },
+        )
 
-        final_answer = ""
-        async for event in analyze_jd_stream(gen_state):
-            if event["type"] == "token":
-                yield f"data: {json.dumps({'type': 'token', 'content': _sanitize_sse_content(event['content'])})}\n\n"
-            elif event["type"] == "done":
-                final_answer = event.get("final_answer", "")
-            elif event["type"] == "error":
-                yield f"data: {json.dumps({'type': 'error', 'message': event['message']})}\n\n"
-
-        # === 阶段 3: 更新 checkpointer ===
-        if _agent_graph:
-            try:
-                config = {"configurable": {"thread_id": session_id}}
-                ai_message = AIMessage(content=final_answer)
-                current_message = HumanMessage(content=question)
-                _agent_graph.update_state(
-                    config,
-                    {"messages": [current_message, ai_message]},
-                )
-                logger.info("JD 分析: 已更新 checkpointer, thread=%s", session_id)
-            except Exception as update_err:
-                logger.error("JD 分析: 更新 checkpointer 失败: %s", update_err, exc_info=True)
-
-        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'answer': final_answer, 'jd_data': jd_summary})}\n\n"
+        yield _sse_event({"type": "done", "session_id": session_id, "answer": final_answer, "jd_data": jd_summary})
         logger.info("JD 分析流式完成: session=%s, answer=%d字符", session_id, len(final_answer))
 
     except Exception as e:
         logger.error("JD 分析流式异常: %s", e, exc_info=True)
-        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        yield _sse_event({"type": "error", "message": str(e)})
 
 
 # ---- JD 分析接口（流式 SSE） ----
@@ -765,16 +738,15 @@ async def jd_analysis_upload(
 @router.get("/session/{session_id}", response_model=SessionInfo)
 async def get_session(session_id: str):
     """获取会话信息（通过 checkpointer 查询 thread 快照）"""
-    if _checkpointer is None:
+    if _agent_graph is None or _checkpointer is None:
         return SessionInfo(session_id=session_id, message_count=0)
 
     try:
         config = {"configurable": {"thread_id": session_id}}
-        state_snapshot = _checkpointer.get(config)
+        state_snapshot = await _agent_graph.aget_state(config)
         if state_snapshot:
-            # langgraph 1.1.x: MemorySaver.get() 返回 dict，数据在 channel_values 中
-            channel_values = state_snapshot.get("channel_values", {})
-            messages = channel_values.get("messages", [])
+            values = getattr(state_snapshot, "values", {}) or {}
+            messages = values.get("messages", [])
             return SessionInfo(session_id=session_id, message_count=len(messages))
     except Exception as e:
         logger.warning("查询 thread 状态失败: session=%s, error=%s", session_id, e)

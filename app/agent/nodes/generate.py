@@ -16,6 +16,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.config import get_stream_writer
 
 from app.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
@@ -61,13 +62,25 @@ def generate(state: AgentState) -> dict:
     )
 
     # 调用 LLM
-    answer = chat_completion(llm_messages)
+    answer = chat_completion(
+        llm_messages,
+        thinking={"type": "disabled"},
+    )
     logger.info("生成完成: 回答 %d 字符", len(answer))
 
     return {
         "final_answer": answer,
         "messages": [AIMessage(content=answer)],
     }
+
+
+def _emit_custom_event(payload: dict[str, Any]) -> None:
+    """在 graph stream_mode=custom 下发送生成阶段事件。"""
+    try:
+        writer = get_stream_writer()
+    except RuntimeError:
+        return
+    writer(payload)
 
 
 def _build_llm_messages(state: AgentState) -> list[dict]:
@@ -143,7 +156,10 @@ async def generate_stream(state: AgentState) -> AsyncGenerator[dict[str, Any], N
     )
 
     full_answer = ""
-    async for delta in chat_completion_stream_async(llm_messages):
+    async for delta in chat_completion_stream_async(
+        llm_messages,
+        thinking={"type": "disabled"},
+    ):
         if delta:
             full_answer += delta
             yield {"type": "token", "content": delta}
@@ -156,3 +172,34 @@ async def generate_stream(state: AgentState) -> AsyncGenerator[dict[str, Any], N
         "final_answer": full_answer,
         "messages": [AIMessage(content=full_answer)],
     }
+
+
+async def generate_streaming_node(state: AgentState) -> dict:
+    """
+    图内流式桥接节点：复用 generate_stream，并通过自定义事件向外发 token。
+
+    Returns:
+        {"final_answer": str, "messages": [AIMessage]}
+    """
+    final_result: dict[str, Any] | None = None
+
+    async for event in generate_stream(state):
+        event_type = event.get("type")
+        if event_type == "token":
+            _emit_custom_event({"type": "token", "content": event.get("content", "")})
+        elif event_type == "done":
+            final_result = {
+                "final_answer": event.get("final_answer", ""),
+                "messages": event.get("messages", [AIMessage(content=event.get("final_answer", ""))]),
+            }
+        elif event_type == "error":
+            message = event.get("message", "生成失败")
+            _emit_custom_event({"type": "error", "message": message})
+            raise RuntimeError(message)
+
+    if final_result is None:
+        final_result = {
+            "final_answer": "",
+            "messages": [AIMessage(content="")],
+        }
+    return final_result
