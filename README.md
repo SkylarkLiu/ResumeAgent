@@ -55,13 +55,17 @@ git clone https://github.com/SkylarkLiu/ResumeAgent.git
 cd ResumeAgent
 ```
 
-### 2. 安装依赖
+### 本地开发启动
+
+适合本机直接运行 Python 服务进行开发调试。
+
+#### 2. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
+#### 3. 配置环境变量
 
 ```bash
 cp .env.example .env
@@ -75,13 +79,51 @@ ZHIPUAI_API_KEY=your_zhipu_api_key_here
 
 > 获取 API Key: [智谱 AI 开放平台](https://open.bigmodel.cn/)
 
-### 4. 启动服务
+#### 4. 启动服务
 
 ```bash
 python -m uvicorn app.main:app --reload
 ```
 
 访问 http://localhost:8000 即可使用。
+
+### Docker 部署启动
+
+适合本地容器验证或服务器部署。使用 Docker 时，不需要手动执行 `pip install -r requirements.txt`，依赖会在镜像构建时自动安装。
+
+#### 2. 配置环境变量
+
+```bash
+cp .env.example .env
+```
+
+最少建议配置：
+
+```env
+ZHIPUAI_API_KEY=your_zhipu_api_key_here
+CHECKPOINT_DB_URL=postgresql://resumeagent:password@postgres:5432/resumeagent?sslmode=disable
+```
+
+#### 3. 启动容器
+
+```bash
+docker compose up -d --build
+```
+
+#### 4. 验证服务
+
+```bash
+docker compose ps
+curl http://localhost:8000/health
+```
+
+如果返回中包含：
+
+```json
+{"status":"ok","checkpointer_backend":"postgres"}
+```
+
+说明 Docker 部署已正常启动，且 PostgreSQL 持久化已生效。
 
 ## 项目结构
 
