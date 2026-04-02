@@ -33,7 +33,7 @@
 | **流式输出** | SSE 逐 token 流式返回，前端实时渲染 Markdown |
 | **简历分析** | 上传简历（PDF/图片/文本），自动提取结构化信息，检索 JD 并生成分析报告 |
 | **JD 分析** | 粘贴或上传岗位描述，自动提取结构化岗位信息并生成岗位解读与简历建议 |
-| **多轮对话** | MemorySaver checkpointer 按 thread 持久化会话状态 |
+| **多轮对话** | 支持 LangGraph checkpointer 按 thread 持久化会话状态，生产环境可落 PostgreSQL |
 | **图片理解** | GLM-4V-Flash 视觉模型，扫描件/截图自动 OCR + 语义理解 |
 
 ## 技术栈
@@ -170,12 +170,57 @@ ResumeAgent/
 TAVILY_API_KEY=your_tavily_key_here
 ```
 
+## Docker 部署与持久化
+
+生产环境建议把持久化拆成两层：
+
+- **PostgreSQL**：保存 LangGraph checkpointer，会话与线程状态跨容器重启保留
+- **Docker Volume**：挂载 `data/faiss_index` 和 `data/raw`，保证知识库索引与原始文件不丢失
+
+### 关键环境变量
+
+```env
+ZHIPUAI_API_KEY=your_zhipu_api_key_here
+TAVILY_API_KEY=your_tavily_key_here
+CHECKPOINT_DB_URL=postgresql://resumeagent:password@postgres:5432/resumeagent?sslmode=disable
+```
+
+### 启动方式
+
+项目已提供 [docker-compose.yml](/Users/superskylark/myproject/ResumeAgent/docker-compose.yml)：
+
+```bash
+docker compose up -d --build
+```
+
+默认会启动两个服务：
+
+- `app`：FastAPI + LangGraph 应用
+- `postgres`：会话持久化数据库
+
+并挂载以下持久化目录：
+
+- `./data/faiss_index -> /app/data/faiss_index`
+- `./data/raw -> /app/data/raw`
+- `postgres_data -> PostgreSQL 数据目录`
+
+### 健康检查
+
+启动后可访问：
+
+```bash
+curl http://localhost:8000/health
+```
+
+返回中会包含 `checkpointer_backend`，用于确认当前是否已切到 `postgres`。
+
 ## 最近改动
 
 - 将简历分析和 JD 分析拆成独立 LangGraph 子图，主图仅保留路由与总调度
 - `/agent/resume-analysis`、`/agent/jd-analysis` 改为基于子图流事件驱动 SSE
 - `/agent/chat/stream` 现已统一走主图执行，不再在 API 层手动重放 QA 路径
 - 路由器已支持 `jd_analysis` 任务类型，同一 session 下可复用 JD 分析结果做后续简历评估
+- 新增 PostgreSQL checkpointer 初始化逻辑与 Docker Compose 部署模板，用于生产环境持久化
 
 ## License
 

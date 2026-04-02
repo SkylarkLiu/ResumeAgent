@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
 
+    # ---- Checkpointer / 持久化 ----
+    checkpoint_db_url: str = ""
+
     # ---- 文件上传限制 ----
     max_upload_size_mb: int = 50
     allowed_extensions: list[str] = [".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md"]

@@ -15,9 +15,9 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from app.agent.checkpointer import get_checkpointer
 from app.agent.nodes.generate import generate_streaming_node, set_max_history
 from app.agent.nodes.kb_search import search_kb, set_retrieval_service
 from app.agent.nodes.normalize import normalize_kb, normalize_web, set_max_chars
@@ -30,16 +30,8 @@ from app.core.logger import setup_logger
 
 logger = setup_logger("agent.graph")
 
-# 全局 checkpointer（进程内内存，跨请求持久化 thread state）
-_checkpointer = MemorySaver()
 _resume_analysis_subgraph = None
 _jd_analysis_subgraph = None
-
-
-def get_checkpointer() -> MemorySaver:
-    """获取全局 checkpointer 实例（供 API 层直接调用 get_state）"""
-    return _checkpointer
-
 
 def get_resume_analysis_subgraph():
     """获取已编译的简历分析子图。"""
@@ -159,9 +151,11 @@ def build_agent_graph(
     builder.add_edge("jd_analysis", END)
 
     # 编译（注入 checkpointer 实现 thread 持久化）
-    graph = builder.compile(checkpointer=_checkpointer)
+    checkpointer = get_checkpointer()
+    graph = builder.compile(checkpointer=checkpointer)
     logger.info(
-        "Agent 主图编译完成 (web_available=%s, checkpointer=MemorySaver, 简历分析+JD分析子图已启用)",
+        "Agent 主图编译完成 (web_available=%s, checkpointer=%s, 简历分析+JD分析子图已启用)",
         web_available,
+        type(checkpointer).__name__,
     )
     return graph

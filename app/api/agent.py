@@ -96,7 +96,7 @@ def _sse_event(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _persist_analysis_state(
+async def _persist_analysis_state(
     *,
     session_id: str,
     question: str,
@@ -117,7 +117,10 @@ def _persist_analysis_state(
         else:
             update_payload["messages"] = [HumanMessage(content=question), AIMessage(content=final_answer)]
 
-        _agent_graph.update_state(config, update_payload)
+        if hasattr(_agent_graph, "aupdate_state"):
+            await _agent_graph.aupdate_state(config, update_payload)
+        else:
+            _agent_graph.update_state(config, update_payload)
         logger.info("分析结果已更新 checkpointer: thread=%s, keys=%s", session_id, list(update_payload.keys()))
     except Exception as update_err:
         logger.error("分析结果更新 checkpointer 失败: %s", update_err, exc_info=True)
@@ -195,7 +198,7 @@ async def _resume_stream_event_generator(
         if error_emitted:
             return
 
-        _persist_analysis_state(
+        await _persist_analysis_state(
             session_id=session_id,
             question=question,
             final_answer=final_answer,
@@ -578,7 +581,7 @@ async def _jd_stream_event_generator(
         if error_emitted:
             return
 
-        _persist_analysis_state(
+        await _persist_analysis_state(
             session_id=session_id,
             question=question,
             final_answer=final_answer,
@@ -735,16 +738,15 @@ async def jd_analysis_upload(
 @router.get("/session/{session_id}", response_model=SessionInfo)
 async def get_session(session_id: str):
     """获取会话信息（通过 checkpointer 查询 thread 快照）"""
-    if _checkpointer is None:
+    if _agent_graph is None or _checkpointer is None:
         return SessionInfo(session_id=session_id, message_count=0)
 
     try:
         config = {"configurable": {"thread_id": session_id}}
-        state_snapshot = _checkpointer.get(config)
+        state_snapshot = await _agent_graph.aget_state(config)
         if state_snapshot:
-            # langgraph 1.1.x: MemorySaver.get() 返回 dict，数据在 channel_values 中
-            channel_values = state_snapshot.get("channel_values", {})
-            messages = channel_values.get("messages", [])
+            values = getattr(state_snapshot, "values", {}) or {}
+            messages = values.get("messages", [])
             return SessionInfo(session_id=session_id, message_count=len(messages))
     except Exception as e:
         logger.warning("查询 thread 状态失败: session=%s, error=%s", session_id, e)

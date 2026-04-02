@@ -1,0 +1,38 @@
+services:
+  app:
+    build: .
+    container_name: resumeagent-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      CHECKPOINT_DB_URL: ${CHECKPOINT_DB_URL:-postgresql://resumeagent:password@postgres:5432/resumeagent?sslmode=disable}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/faiss_index:/app/data/faiss_index
+      - ./data/raw:/app/data/raw
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    container_name: resumeagent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: resumeagent
+      POSTGRES_USER: resumeagent
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resumeagent -d resumeagent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

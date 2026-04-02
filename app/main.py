@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router as chat_router, set_rag_service
 from app.api.ingest import router as ingest_router, set_vector_store
-from app.agent import build_agent_graph
+from app.agent import build_agent_graph, get_checkpointer, get_checkpointer_backend, init_checkpointer, shutdown_checkpointer
 from app.api.agent import router as agent_router, set_agent_graph, set_checkpointer
 from app.core.config import get_settings
 from app.core.logger import setup_logger
@@ -54,7 +54,8 @@ async def lifespan(app: FastAPI):
     set_rag_service(_rag)
 
     # ---- 初始化 Agent 模块 ----
-    logger.info("初始化 Agent 模块 (checkpointer=MemorySaver)...")
+    await init_checkpointer(settings)
+    logger.info("初始化 Agent 模块 (checkpointer=%s)...", get_checkpointer_backend())
 
     # 检索服务（复用现有 vector_store）
     retrieval_service = RetrievalService(_store)
@@ -66,7 +67,7 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Web 搜索服务未启用 (缺少 TAVILY_API_KEY)")
 
-    # 编译 Agent 主图（内部创建 MemorySaver checkpointer）
+    # 编译 Agent 主图（使用已初始化的 checkpointer）
     agent_graph = build_agent_graph(
         retrieval_service=retrieval_service,
         web_search_service=web_search_service,
@@ -74,7 +75,6 @@ async def lifespan(app: FastAPI):
     )
 
     # 获取 checkpointer 并注入到 API 层
-    from app.agent.graph import get_checkpointer
     checkpointer = get_checkpointer()
 
     # 注入到 Agent API 模块
@@ -89,6 +89,7 @@ async def lifespan(app: FastAPI):
     if _store and not _store.is_empty():
         _store.save()
         logger.info("索引已保存")
+    await shutdown_checkpointer()
 
 
 # 创建 FastAPI 应用
@@ -136,4 +137,5 @@ async def health():
     return {
         "status": "ok",
         "index_records": _store.total if _store else 0,
+        "checkpointer_backend": get_checkpointer_backend(),
     }
