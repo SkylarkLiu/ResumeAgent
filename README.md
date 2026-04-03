@@ -103,9 +103,10 @@ cp .env.example .env
 ZHIPUAI_API_KEY=your_zhipu_api_key_here
 CHECKPOINT_DB_URL=postgresql://resumeagent:password@postgres:5432/resumeagent?sslmode=disable
 DEBIAN_MIRROR=mirrors.aliyun.com
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-其中 `DEBIAN_MIRROR` 用于 Docker 构建阶段的 Debian 软件源加速，国内服务器建议保留默认值；如果你的环境访问官方源稳定，也可以不填。
+其中 `DEBIAN_MIRROR` 用于 Docker 构建阶段的 Debian 软件源加速，`PIP_INDEX_URL` 用于 Python 依赖下载加速；国内服务器建议保留这两个默认值，如果你的环境访问官方源稳定，也可以不填。
 
 #### 3. 启动容器
 
@@ -378,6 +379,7 @@ cp .env.example .env
 - `TAVILY_API_KEY`（可选）
 - `CHECKPOINT_DB_URL`
 - `DEBIAN_MIRROR`，国内服务器建议设为 `mirrors.aliyun.com`
+- `PIP_INDEX_URL`，国内服务器建议设为 `https://pypi.tuna.tsinghua.edu.cn/simple`
 
 #### 3. 创建数据目录
 

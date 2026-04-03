@@ -3,7 +3,7 @@
    阶段 3：新增简历分析功能
    ============================================ */
 
-const API_BASE = '';  // 同源部署，留空
+const API_BASE = '/resumeagent';  // 子路径部署前缀
 
 // --- Session 管理 ---
 let sessionId = localStorage.getItem('agent_session_id') || '';
