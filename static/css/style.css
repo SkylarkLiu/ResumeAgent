@@ -340,6 +340,33 @@ body {
     margin: 12px 0;
 }
 
+.agent-timeline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0 0 10px 0;
+}
+
+.agent-step {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.agent-step.running {
+    background: rgba(255, 159, 28, 0.14);
+    color: #b86b00;
+}
+
+.agent-step.done {
+    background: rgba(46, 196, 182, 0.14);
+    color: #1d8f83;
+}
+
 /* 来源引用 */
 .sources {
     margin-top: 8px;

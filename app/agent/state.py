@@ -55,6 +55,12 @@ class AgentState(TypedDict, total=False):
     # ---- 路由决策（存储字符串值，避免 msgpack 序列化问题）----
     route_type: str  # "retrieve" | "web" | "direct"
     task_type: str   # "qa" | "resume_analysis"
+    active_agent: str | None
+    execution_plan: list[str]
+    current_step: int
+    max_steps: int
+    final_response_ready: bool
+    agent_outputs: dict[str, dict]
 
     # ---- 会话与跨轮次数据 ----
     session_id: str
