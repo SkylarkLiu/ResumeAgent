@@ -3,7 +3,7 @@
    阶段 3：新增简历分析功能
    ============================================ */
 
-const API_BASE = '/resumeagent';  // 子路径部署前缀
+const API_BASE = window.location.pathname.startsWith('/resumeagent') ? '/resumeagent' : '';
 
 // --- Session 管理 ---
 let sessionId = localStorage.getItem('agent_session_id') || '';
@@ -240,6 +240,49 @@ function buildSourcesHtml(sources) {
     return html;
 }
 
+function buildAgentTimelineHtml(agentSteps) {
+    if (!agentSteps || agentSteps.length === 0) return '';
+
+    const labels = {
+        qa_flow: 'QA 专家',
+        jd_expert: 'JD 专家',
+        resume_expert: '简历专家'
+    };
+
+    const items = agentSteps.map((step) => {
+        const label = labels[step.agent] || step.agent || '处理中';
+        const text = step.status === 'done' ? `已完成 ${label}` : `正在调用 ${label}`;
+        return `<span class="agent-step ${step.status}">${escapeHtml(text)}</span>`;
+    }).join('');
+
+    return `<div class="agent-timeline">${items}</div>`;
+}
+
+function renderAiMessageContent({ routeType, fullAnswer, currentSources, agentSteps }) {
+    const routeLabels = {
+        kb: '📚 知识库',
+        web: '🌐 网络',
+        direct: '💬 直接回答',
+        resume_analysis: '📋 简历分析',
+        jd_analysis: '🎯 岗位分析'
+    };
+
+    const routeHtml = routeType ? `<span class="route-tag ${routeType}">${routeLabels[routeType] || routeType}</span><br>` : '';
+    const timelineHtml = buildAgentTimelineHtml(agentSteps);
+    const sourcesHtml = currentSources.length > 0 ? buildSourcesHtml(currentSources) : '';
+
+    if (!fullAnswer) {
+        return routeHtml + timelineHtml + sourcesHtml;
+    }
+
+    try {
+        return routeHtml + timelineHtml + renderMarkdown(fullAnswer) + sourcesHtml;
+    } catch (renderErr) {
+        console.warn('Markdown 渲染异常，降级为纯文本:', renderErr);
+        return routeHtml + timelineHtml + '<p>' + escapeHtml(fullAnswer) + '</p>' + sourcesHtml;
+    }
+}
+
 // --- Agent 多轮对话（流式） ---
 async function sendChat(question) {
     if (isProcessing || !question.trim()) return;
@@ -274,6 +317,7 @@ async function sendChat(question) {
         let fullAnswer = '';
         let currentSources = [];
         let currentRoute = 'direct';
+        let agentSteps = [];
         let msgDiv = null;
 
         while (true) {
@@ -297,36 +341,82 @@ async function sendChat(question) {
                         removeTypingIndicator();
                         currentRoute = payload.route;
                         msgDiv = appendMessage('ai', '', [], currentRoute, true);
+                        const contentEl = msgDiv.querySelector('.message-content');
+                        contentEl.innerHTML = renderAiMessageContent({
+                            routeType: currentRoute,
+                            fullAnswer,
+                            currentSources,
+                            agentSteps,
+                        });
                         setStatus('生成中', 'processing');
+
+                    } else if (payload.type === 'agent_start') {
+                        agentSteps = agentSteps.filter(step => !(step.agent === payload.agent && step.status === 'running'));
+                        agentSteps.push({ agent: payload.agent, status: 'running' });
+                        if (msgDiv) {
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                            });
+                        }
+
+                    } else if (payload.type === 'agent_result') {
+                        agentSteps = agentSteps.map(step =>
+                            step.agent === payload.agent ? { ...step, status: 'done' } : step
+                        );
+                        if (msgDiv) {
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                            });
+                        }
 
                     } else if (payload.type === 'sources') {
                         // 检索来源
                         currentSources = payload.sources || [];
                         // 更新消息气泡的 sources
                         if (msgDiv) {
-                            const sourcesHtml = buildSourcesHtml(currentSources);
-                            const existingContent = msgDiv.querySelector('.message-content').innerHTML;
-                            msgDiv.querySelector('.message-content').innerHTML = existingContent + sourcesHtml;
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                            });
                         }
 
                     } else if (payload.type === 'token') {
                         // 增量文本
                         fullAnswer += payload.content;
                         if (msgDiv) {
-                            // 增量渲染 Markdown
                             const contentEl = msgDiv.querySelector('.message-content');
-                            const sourcesHtml = currentSources.length > 0 ? buildSourcesHtml(currentSources) : '';
-                            try {
-                                contentEl.innerHTML = renderMarkdown(fullAnswer) + sourcesHtml;
-                            } catch (renderErr) {
-                                console.warn('Markdown 渲染异常，降级为纯文本:', renderErr);
-                                contentEl.innerHTML = '<p>' + escapeHtml(fullAnswer) + '</p>' + sourcesHtml;
-                            }
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                            });
                             scrollToBottom();
                         }
 
                     } else if (payload.type === 'done') {
                         // 完成
+                        if (!fullAnswer && payload.answer && msgDiv) {
+                            fullAnswer = payload.answer;
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                            });
+                        }
                         if (payload.session_id && payload.session_id !== sessionId) {
                             sessionId = payload.session_id;
                             localStorage.setItem('agent_session_id', sessionId);

@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agent.prompts import ROUTER_SYSTEM_PROMPT
 from app.agent.state import AgentState, RouteDecision, RouteType, TaskType
@@ -17,6 +17,121 @@ logger = setup_logger("agent.router")
 
 # 最大重试次数
 _MAX_RETRIES = 1
+
+
+def _latest_user_question(messages: list) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            content = msg.content.strip() if isinstance(msg.content, str) else ""
+            if content:
+                return content
+    return ""
+
+
+def _build_state_summary(state: AgentState) -> str:
+    jd_data = state.get("jd_data") or {}
+    resume_data = state.get("resume_data") or {}
+
+    parts: list[str] = []
+    parts.append(f"has_jd_data={bool(jd_data)}")
+    parts.append(f"has_resume_data={bool(resume_data)}")
+
+    jd_position = jd_data.get("position") or ""
+    jd_summary = jd_data.get("summary") or ""
+    if jd_position:
+        parts.append(f"jd_position={jd_position}")
+    if jd_summary:
+        parts.append(f"jd_summary={jd_summary[:120]}")
+
+    resume_summary = resume_data.get("summary") or ""
+    resume_target = resume_data.get("target_position") or ""
+    if resume_target:
+        parts.append(f"resume_target_position={resume_target}")
+    if resume_summary:
+        parts.append(f"resume_summary={resume_summary[:120]}")
+
+    return "\n".join(parts)
+
+
+def _is_resume_like_text(question: str) -> bool:
+    q = question.lower()
+    if len(question) >= 250:
+        resume_markers = (
+            "教育经历",
+            "工作经历",
+            "项目经历",
+            "专业技能",
+            "教育背景",
+            "自我评价",
+            "实习经历",
+            "校内经历",
+            "个人信息",
+            "姓名",
+            "电话",
+            "邮箱",
+            "毕业院校",
+            "技能栈",
+        )
+        hits = sum(1 for marker in resume_markers if marker in question)
+        if hits >= 2:
+            return True
+
+    compact_markers = ("简历如下", "这是我的简历", "下面是我的简历", "我的简历内容", "帮我看下简历")
+    return any(marker in q for marker in compact_markers)
+
+
+def _rule_based_followup_route(question: str, state: AgentState, web_search_available: bool) -> dict | None:
+    q = question.lower()
+    has_jd_data = bool(state.get("jd_data"))
+    has_resume_data = bool(state.get("resume_data"))
+
+    jd_followup_keywords = (
+        "关于以上jd",
+        "关于以上 jd",
+        "关于这个jd",
+        "关于这个 jd",
+        "基于以上jd",
+        "基于以上 jd",
+        "根据这个jd",
+        "根据这个 jd",
+        "这个岗位",
+        "该岗位",
+        "这个jd",
+        "这个 jd",
+    )
+    resume_keywords = ("简历", "匹配度", "匹配", "评估", "优化", "修改简历", "改简历", "简历建议", "是否匹配")
+    latest_keywords = ("最新", "今天", "本周", "最近", "2026", "实时", "新闻")
+
+    if has_jd_data and (_is_resume_like_text(question) or (has_resume_data and any(k in q for k in resume_keywords))):
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.RESUME_ANALYSIS.value,
+            "messages": [AIMessage(content="[路由决策] 已有 JD 上下文，识别为简历评估/匹配场景，走 resume_analysis")],
+        }
+
+    if has_jd_data and any(k in q for k in resume_keywords):
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.RESUME_ANALYSIS.value,
+            "messages": [AIMessage(content="[路由决策] 已有 JD 上下文且用户在做简历/匹配分析，走 resume_analysis")],
+        }
+
+    if has_jd_data and any(k in q for k in jd_followup_keywords):
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.QA.value,
+            "messages": [AIMessage(content="[路由决策] 基于已存在 JD 上下文，走 direct 路径继续回答")],
+        }
+
+    if any(k in q for k in latest_keywords):
+        route_type = RouteType.WEB.value if web_search_available else RouteType.RETRIEVE.value
+        return {
+            "route_type": route_type,
+            "task_type": TaskType.QA.value,
+            "messages": [AIMessage(content=f"[路由决策] 时效性问题，走 {route_type} 路径")],
+        }
+
+    return None
 
 
 def _parse_json_from_response(text: str) -> dict | None:
@@ -105,17 +220,37 @@ def route_query(
         {"route_type": RouteType, "task_type": TaskType, "messages": [AIMessage]}
     """
     messages = state.get("messages", [])
+    question = _latest_user_question(messages)
+    if not question:
+        logger.warning("路由阶段未找到当前用户问题，fallback 到 DIRECT+QA")
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.QA.value,
+            "messages": [AIMessage(content="[路由决策] 未找到有效问题，fallback 为直接回答")],
+        }
 
-    # 提取最近几条消息作为路由上下文
-    history_for_router = messages[-6:] if len(messages) > 6 else messages
+    rule_result = _rule_based_followup_route(question, state, web_search_available)
+    if rule_result is not None:
+        logger.info(
+            "路由规则命中: route=%s, task=%s, question=%s",
+            rule_result["route_type"],
+            rule_result["task_type"],
+            question[:80],
+        )
+        return rule_result
 
-    # 构造路由请求
-    router_messages = [{"role": "system", "content": ROUTER_SYSTEM_PROMPT}]
-    for msg in history_for_router:
-        if isinstance(msg, HumanMessage):
-            router_messages.append({"role": "user", "content": msg.content})
-        elif isinstance(msg, AIMessage):
-            router_messages.append({"role": "assistant", "content": msg.content})
+    state_summary = _build_state_summary(state)
+    router_messages = [
+        {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"当前用户问题：\n{question}\n\n"
+                f"结构化状态摘要：\n{state_summary}\n\n"
+                "请只输出一行 JSON。"
+            ),
+        },
+    ]
 
     # 尝试路由（含重试）
     last_error = None

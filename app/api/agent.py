@@ -96,6 +96,44 @@ def _sse_event(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _build_chat_turn_input_state(question: str) -> dict[str, Any]:
+    """
+    为每一轮新的 chat 请求构造初始状态。
+
+    注意：
+    - messages 追加当前用户消息
+    - jd_data / resume_data / 历史消息 由 checkpointer 自动保留
+    - execution_plan / current_step / active_agent 等计划态必须每轮重置，
+      否则会错误复用上一轮的调度结果
+    """
+    return {
+        "messages": [HumanMessage(content=question)],
+        "context_sources": [],
+        "working_context": "",
+        "final_answer": "",
+        "execution_plan": [],
+        "current_step": 0,
+        "max_steps": 3,
+        "active_agent": None,
+        "final_response_ready": False,
+    }
+
+
+async def _load_session_values(session_id: str) -> dict[str, Any]:
+    """读取当前 session 已持久化的状态值。"""
+    if _agent_graph is None:
+        return {}
+
+    try:
+        config = {"configurable": {"thread_id": session_id}}
+        state_snapshot = await _agent_graph.aget_state(config)
+        if state_snapshot:
+            return getattr(state_snapshot, "values", {}) or {}
+    except Exception as e:
+        logger.warning("读取 session 状态失败: session=%s, error=%s", session_id, e)
+    return {}
+
+
 async def _persist_analysis_state(
     *,
     session_id: str,
@@ -111,6 +149,12 @@ async def _persist_analysis_state(
     try:
         config = {"configurable": {"thread_id": session_id}}
         update_payload = dict(extra_state or {})
+        task_type = str(update_payload.get("task_type", ""))
+        as_node = (
+            "resume_expert" if task_type == "resume_analysis"
+            else "jd_expert" if task_type == "jd_analysis"
+            else "generate_final"
+        )
 
         if ai_messages:
             update_payload["messages"] = [HumanMessage(content=question), *ai_messages]
@@ -118,9 +162,9 @@ async def _persist_analysis_state(
             update_payload["messages"] = [HumanMessage(content=question), AIMessage(content=final_answer)]
 
         if hasattr(_agent_graph, "aupdate_state"):
-            await _agent_graph.aupdate_state(config, update_payload)
+            await _agent_graph.aupdate_state(config, update_payload, as_node=as_node)
         else:
-            _agent_graph.update_state(config, update_payload)
+            _agent_graph.update_state(config, update_payload, as_node=as_node)
         logger.info("分析结果已更新 checkpointer: thread=%s, keys=%s", session_id, list(update_payload.keys()))
     except Exception as update_err:
         logger.error("分析结果更新 checkpointer 失败: %s", update_err, exc_info=True)
@@ -150,12 +194,14 @@ async def _resume_stream_event_generator(
             return
 
         config = {"configurable": {"thread_id": session_id}}
+        session_values = await _load_session_values(session_id)
         input_state = {
             "messages": [HumanMessage(content=question)],
             "context_sources": [],
             "working_context": "",
             "final_answer": "",
             "resume_data": resume_data,
+            "jd_data": session_values.get("jd_data"),
         }
 
         extracted_resume = resume_data
@@ -246,12 +292,7 @@ async def agent_chat(request: AgentChatRequest):
 
     config = {"configurable": {"thread_id": session_id}}
 
-    input_state = {
-        "messages": [HumanMessage(content=question)],
-        "context_sources": [],
-        "working_context": "",
-        "final_answer": "",
-    }
+    input_state = _build_chat_turn_input_state(question)
 
     try:
         result = await _agent_graph.ainvoke(input_state, config=config)
@@ -301,6 +342,8 @@ async def agent_chat_stream(request: AgentChatRequest):
 
     SSE 事件格式：
     - data: {"type": "route", "route": "retrieve", "task": "qa"}
+    - data: {"type": "agent_start", "agent": "qa_flow|jd_expert|resume_expert"}
+    - data: {"type": "agent_result", "agent": "..."}
     - data: {"type": "sources", "sources": [...]}
     - data: {"type": "token", "content": "..."}  (多次)
     - data: {"type": "done", "session_id": "..."}
@@ -318,12 +361,7 @@ async def agent_chat_stream(request: AgentChatRequest):
         try:
             logger.info("Agent 流式请求: thread=%s, question=%s", session_id, question[:50])
 
-            input_state = {
-                "messages": [HumanMessage(content=question)],
-                "context_sources": [],
-                "working_context": "",
-                "final_answer": "",
-            }
+            input_state = _build_chat_turn_input_state(question)
 
             route_str = "direct"
             task_str = "qa"
@@ -339,12 +377,25 @@ async def agent_chat_stream(request: AgentChatRequest):
                     event_type = payload.get("type")
                     if event_type == "token":
                         yield _sse_event({"type": "token", "content": _sanitize_sse_content(payload.get("content", ""))})
+                    elif event_type == "agent_start":
+                        yield _sse_event({"type": "agent_start", "agent": payload.get("agent", "")})
+                    elif event_type == "agent_result":
+                        yield _sse_event({"type": "agent_result", "agent": payload.get("agent", "")})
+                    elif event_type == "sources":
+                        sources_api = _build_sources(payload.get("sources", []))
+                        yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
+                        sources_sent = True
+                    elif event_type == "extracted":
+                        if "resume_data" in payload:
+                            yield _sse_event({"type": "extracted", "resume_data": payload.get("resume_data", {})})
+                        elif "jd_data" in payload:
+                            yield _sse_event({"type": "extracted", "jd_data": payload.get("jd_data", {})})
                     elif event_type == "error":
                         yield _sse_event({"type": "error", "message": payload.get("message", "未知错误")})
                 elif mode == "updates":
-                    if "router" in payload:
-                        route_type = payload["router"].get("route_type", route_str)
-                        task_type = payload["router"].get("task_type", task_str)
+                    if "supervisor_plan" in payload:
+                        route_type = payload["supervisor_plan"].get("route_type", route_str)
+                        task_type = payload["supervisor_plan"].get("task_type", task_str)
                         route_str = route_type.value if hasattr(route_type, "value") else str(route_type)
                         task_str = task_type.value if hasattr(task_type, "value") else str(task_type)
                         logger.info("路由决策: route=%s, task=%s", route_str, task_str)
@@ -353,25 +404,19 @@ async def agent_chat_stream(request: AgentChatRequest):
                             yield _sse_event({"type": "sources", "sources": []})
                             sources_sent = True
 
-                    if "search_kb" in payload and not sources_sent:
-                        context_sources = payload["search_kb"].get("context_sources", [])
-                        sources_api = _build_sources(context_sources)
-                        yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
-                        sources_sent = True
-
-                    if "search_web" in payload and not sources_sent:
-                        context_sources = payload["search_web"].get("context_sources", [])
-                        sources_api = _build_sources(context_sources)
-                        yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
-                        sources_sent = True
-
-                    if "generate" in payload:
-                        final_answer = payload["generate"].get("final_answer", final_answer)
+                    if "qa_flow" in payload:
+                        final_answer = payload["qa_flow"].get("final_answer", final_answer)
+                    if "resume_expert" in payload:
+                        final_answer = payload["resume_expert"].get("final_answer", final_answer)
+                    if "jd_expert" in payload:
+                        final_answer = payload["jd_expert"].get("final_answer", final_answer)
+                    if "generate_final" in payload:
+                        final_answer = payload["generate_final"].get("final_answer", final_answer)
 
             if not sources_sent:
                 yield _sse_event({"type": "sources", "sources": []})
 
-            yield _sse_event({"type": "done", "session_id": session_id})
+            yield _sse_event({"type": "done", "session_id": session_id, "answer": final_answer})
 
             logger.info(
                 "Agent 流式回复完成: thread=%s, route=%s, answer=%d字符",
@@ -542,12 +587,14 @@ async def _jd_stream_event_generator(
             return
 
         config = {"configurable": {"thread_id": session_id}}
+        session_values = await _load_session_values(session_id)
         input_state = {
             "messages": [HumanMessage(content=question)],
             "context_sources": [],
             "working_context": "",
             "final_answer": "",
             "jd_data": jd_data,
+            "resume_data": session_values.get("resume_data"),
         }
 
         extracted_jd = jd_data
