@@ -14,15 +14,35 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agent.prompts import RESUME_ANALYSIS_PROMPT
+from app.agent.prompts import RESUME_ANALYSIS_PROMPT, RESUME_FOLLOWUP_PROMPT
 from app.agent.state import AgentState
 from app.core.logger import setup_logger
 from app.services.llm_service import chat_completion, chat_completion_stream_async
 
 logger = setup_logger("agent.generate_analysis")
 
+_DEFAULT_ANALYSIS_QUESTIONS = {
+    "请对我的简历进行全面分析评估",
+    "请对我的简历做全面分析",
+    "请帮我分析这份简历",
+}
 
-def _build_analysis_messages(state: AgentState) -> list[dict] | None:
+
+def _is_followup_resume_question(user_question: str, resume_data: dict) -> bool:
+    q = (user_question or "").strip()
+    if not q:
+        return False
+    if q in _DEFAULT_ANALYSIS_QUESTIONS:
+        return False
+    # 已有结构化简历，且用户不是在发起标准“完整评估”请求时，按追问处理
+    has_structured_resume = any(
+        resume_data.get(key)
+        for key in ("summary", "skills", "projects", "experience", "education", "target_position", "name")
+    )
+    return has_structured_resume
+
+
+def _build_analysis_messages(state: AgentState) -> tuple[list[dict] | None, bool]:
     """
     构造简历分析的 LLM 消息列表（供 generate_analysis 和 generate_analysis_stream 复用）。
 
@@ -42,7 +62,7 @@ def _build_analysis_messages(state: AgentState) -> list[dict] | None:
 
     # 检查简历提取是否出错
     if resume_data.get("extract_error"):
-        return None
+        return None, False
 
     # 序列化 resume_data（去掉 raw_text 避免超长）
     resume_for_prompt = {k: v for k, v in resume_data.items() if k != "raw_text"}
@@ -59,16 +79,18 @@ def _build_analysis_messages(state: AgentState) -> list[dict] | None:
         jd_context = "（知识库中暂无匹配的岗位要求标准，将基于通用后端岗位标准进行评估）"
 
     # 构造 prompt
-    prompt = RESUME_ANALYSIS_PROMPT.format(
+    is_followup = _is_followup_resume_question(user_question, resume_data)
+    prompt_template = RESUME_FOLLOWUP_PROMPT if is_followup else RESUME_ANALYSIS_PROMPT
+    prompt = prompt_template.format(
         resume_data=resume_json,
         jd_context=jd_context,
         user_question=user_question or "请对我的简历进行全面分析评估",
     )
 
-    return [
+    return ([
         {"role": "system", "content": prompt},
         {"role": "user", "content": user_question or "请对我的简历进行全面分析评估"},
-    ]
+    ], is_followup)
 
 
 def generate_analysis(state: AgentState) -> dict:
@@ -97,7 +119,7 @@ def generate_analysis(state: AgentState) -> dict:
             "messages": [AIMessage(content=f"简历解析失败：{error_msg}")],
         }
 
-    llm_messages = _build_analysis_messages(state)
+    llm_messages, is_followup = _build_analysis_messages(state)
 
     logger.info(
         "生成简历分析报告: resume=%s, 用户问题='%s'",
@@ -108,8 +130,8 @@ def generate_analysis(state: AgentState) -> dict:
     try:
         answer = chat_completion(
             llm_messages,
-            temperature=0.5,
-            max_tokens=4096,
+            temperature=0.4 if is_followup else 0.5,
+            max_tokens=1600 if is_followup else 4096,
             thinking={"type": "disabled"},
         )
         logger.info("简历分析报告生成完成: %d 字符", len(answer))
@@ -149,7 +171,7 @@ async def generate_analysis_stream(state: AgentState) -> AsyncGenerator[dict[str
         }
         return
 
-    llm_messages = _build_analysis_messages(state)
+    llm_messages, is_followup = _build_analysis_messages(state)
     if llm_messages is None:
         error_answer = "❌ 简历分析消息构造失败"
         yield {
@@ -168,8 +190,8 @@ async def generate_analysis_stream(state: AgentState) -> AsyncGenerator[dict[str
     try:
         async for delta in chat_completion_stream_async(
             llm_messages,
-            temperature=0.5,
-            max_tokens=4096,
+            temperature=0.4 if is_followup else 0.5,
+            max_tokens=1600 if is_followup else 4096,
             thinking={"type": "disabled"},
         ):
             if delta:

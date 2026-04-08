@@ -37,6 +37,19 @@ def _emit_custom_event(payload: dict[str, Any]) -> None:
 
 def _extract_jd_node(state: JDAnalysisState) -> dict:
     """提取 JD 并发送 extracted 事件。"""
+    existing_jd = state.get("jd_data") or {}
+    has_structured_jd = any(
+        existing_jd.get(key)
+        for key in ("position", "summary", "skills_must", "responsibilities", "requirements")
+    ) and not existing_jd.get("extract_error")
+
+    if has_structured_jd:
+        _emit_custom_event({"type": "status", "content": "正在复用已保存岗位信息"})
+        summary = {k: v for k, v in existing_jd.items() if k != "raw_text"}
+        _emit_custom_event({"type": "extracted", "jd_data": summary})
+        return {"jd_data": existing_jd}
+
+    _emit_custom_event({"type": "status", "content": "正在解析岗位描述"})
     result = extract_jd(state)
     jd_data = result.get("jd_data") or {}
     summary = {k: v for k, v in jd_data.items() if k != "raw_text"}

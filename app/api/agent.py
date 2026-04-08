@@ -228,6 +228,8 @@ async def _resume_stream_event_generator(
                     yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
                 elif event_type == "token":
                     yield _sse_event({"type": "token", "content": _sanitize_sse_content(payload.get("content", ""))})
+                elif event_type == "status":
+                    yield _sse_event({"type": "status", "content": payload.get("content", "")})
                 elif event_type == "error":
                     error_emitted = True
                     yield _sse_event({"type": "error", "message": payload.get("message", "未知错误")})
@@ -381,6 +383,10 @@ async def agent_chat_stream(request: AgentChatRequest):
                         yield _sse_event({"type": "agent_start", "agent": payload.get("agent", "")})
                     elif event_type == "agent_result":
                         yield _sse_event({"type": "agent_result", "agent": payload.get("agent", "")})
+                    elif event_type == "agent_cache_hit":
+                        yield _sse_event({"type": "agent_cache_hit", "agent": payload.get("agent", "")})
+                    elif event_type == "status":
+                        yield _sse_event({"type": "status", "content": payload.get("content", "")})
                     elif event_type == "sources":
                         sources_api = _build_sources(payload.get("sources", []))
                         yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
@@ -615,6 +621,8 @@ async def _jd_stream_event_generator(
                     yield _sse_event({"type": "extracted", "jd_data": jd_summary})
                 elif event_type == "token":
                     yield _sse_event({"type": "token", "content": _sanitize_sse_content(payload.get("content", ""))})
+                elif event_type == "status":
+                    yield _sse_event({"type": "status", "content": payload.get("content", "")})
                 elif event_type == "error":
                     error_emitted = True
                     yield _sse_event({"type": "error", "message": payload.get("message", "未知错误")})

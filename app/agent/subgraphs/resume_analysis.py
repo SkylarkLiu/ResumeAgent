@@ -42,6 +42,19 @@ def _emit_custom_event(payload: dict[str, Any]) -> None:
 
 def _extract_resume_node(state: ResumeAnalysisState) -> dict:
     """提取简历并发送 extracted 事件。"""
+    existing_resume = state.get("resume_data") or {}
+    has_structured_resume = any(
+        existing_resume.get(key)
+        for key in ("summary", "skills", "projects", "experience", "education", "target_position", "name")
+    ) and not existing_resume.get("extract_error")
+
+    if has_structured_resume:
+        _emit_custom_event({"type": "status", "content": "正在读取已保存简历"})
+        summary = {k: v for k, v in existing_resume.items() if k != "raw_text"}
+        _emit_custom_event({"type": "extracted", "resume_data": summary})
+        logger.info("复用已有结构化简历数据，跳过重复提取")
+        return {"resume_data": existing_resume}
+
     result = extract_resume(state)
     resume_data = result.get("resume_data") or {}
     summary = {k: v for k, v in resume_data.items() if k != "raw_text"}

@@ -28,6 +28,13 @@ def _normalize_agent_name(name: str | None) -> str | None:
     return None
 
 
+AGENT_STATUS_TEXT: dict[str, str] = {
+    "qa_flow": "正在检索知识库",
+    "jd_expert": "正在分析岗位描述",
+    "resume_expert": "正在评估简历",
+}
+
+
 def _infer_resume_jd_chain(question: str, has_jd_data: bool) -> bool:
     q = question.lower()
     keywords = ("匹配", "match", "匹配度", "对比", "结合岗位", "结合jd", "结合 jd", "目标岗位")
@@ -52,6 +59,9 @@ def supervisor_plan_node(state: AgentState, *, web_search_available: bool = Fals
         active_agent = _normalize_agent_name(execution_plan[current_step])
         if active_agent:
             _emit_custom_event({"type": "agent_start", "agent": active_agent})
+            status_text = AGENT_STATUS_TEXT.get(active_agent, "")
+            if status_text:
+                _emit_custom_event({"type": "status", "content": status_text})
             return {
                 "active_agent": active_agent,
                 "max_steps": max_steps,
@@ -92,6 +102,9 @@ def supervisor_plan_node(state: AgentState, *, web_search_available: bool = Fals
 
     active_agent = _normalize_agent_name(execution_plan[0] if execution_plan else "respond") or "respond"
     _emit_custom_event({"type": "agent_start", "agent": active_agent})
+    status_text = AGENT_STATUS_TEXT.get(active_agent, "")
+    if status_text:
+        _emit_custom_event({"type": "status", "content": status_text})
 
     return {
         "route_type": route_type,
