@@ -353,6 +353,12 @@ async function sendChat(question) {
                     } else if (payload.type === 'agent_start') {
                         agentSteps = agentSteps.filter(step => !(step.agent === payload.agent && step.status === 'running'));
                         agentSteps.push({ agent: payload.agent, status: 'running' });
+                        const statusLabels = {
+                            qa_flow: '正在检索知识库',
+                            jd_expert: '正在分析岗位描述',
+                            resume_expert: '正在评估简历'
+                        };
+                        setStatus(statusLabels[payload.agent] || '处理中', 'processing');
                         if (msgDiv) {
                             const contentEl = msgDiv.querySelector('.message-content');
                             contentEl.innerHTML = renderAiMessageContent({
@@ -375,6 +381,14 @@ async function sendChat(question) {
                                 currentSources,
                                 agentSteps,
                             });
+                        }
+
+                    } else if (payload.type === 'agent_cache_hit') {
+                        setStatus('复用已有结果', 'processing');
+
+                    } else if (payload.type === 'status') {
+                        if (payload.content) {
+                            setStatus(payload.content, 'processing');
                         }
 
                     } else if (payload.type === 'sources') {
@@ -582,6 +596,11 @@ async function analyzeResume(file, text) {
                             const sourcesHtml = buildSourcesHtml(currentSources);
                             const existingContent = msgDiv.querySelector('.message-content').innerHTML;
                             msgDiv.querySelector('.message-content').innerHTML = existingContent + sourcesHtml;
+                        }
+
+                    } else if (payload.type === 'status') {
+                        if (payload.content) {
+                            setStatus(payload.content, 'processing');
                         }
 
                     } else if (payload.type === 'token') {
@@ -986,6 +1005,11 @@ async function analyzeJD(file, text) {
                                 contentEl.innerHTML = '<p>' + escapeHtml(fullAnswer) + '</p>';
                             }
                             scrollToBottom();
+                        }
+
+                    } else if (payload.type === 'status') {
+                        if (payload.content) {
+                            setStatus(payload.content, 'processing');
                         }
 
                     } else if (payload.type === 'done') {

@@ -61,6 +61,7 @@ class AgentState(TypedDict, total=False):
     max_steps: int
     final_response_ready: bool
     agent_outputs: dict[str, dict]
+    expert_cache: dict[str, dict]
 
     # ---- 会话与跨轮次数据 ----
     session_id: str

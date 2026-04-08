@@ -8,7 +8,9 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.agents import (
+    build_jd_expert_node,
     build_qa_flow_subgraph,
+    build_resume_expert_node,
     generate_final_node,
     supervisor_plan_node,
     supervisor_plan_route,
@@ -88,8 +90,8 @@ def build_agent_graph(
         lambda state: supervisor_plan_node(state, web_search_available=web_search_service.is_available),
     )
     builder.add_node("qa_flow", _qa_flow_subgraph)
-    builder.add_node("jd_expert", _jd_analysis_subgraph)
-    builder.add_node("resume_expert", _resume_analysis_subgraph)
+    builder.add_node("jd_expert", build_jd_expert_node(_jd_analysis_subgraph))
+    builder.add_node("resume_expert", build_resume_expert_node(_resume_analysis_subgraph))
     builder.add_node("supervisor_review", supervisor_review_node)
     builder.add_node("generate_final", generate_final_node)
 
