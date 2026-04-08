@@ -14,7 +14,12 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agent.prompts import RESUME_ANALYSIS_PROMPT, RESUME_FOLLOWUP_PROMPT
+from app.agent.prompts import (
+    MATCH_FOLLOWUP_DIRECT_PROMPT,
+    MATCH_FOLLOWUP_PROMPT,
+    RESUME_ANALYSIS_PROMPT,
+    RESUME_FOLLOWUP_PROMPT,
+)
 from app.agent.state import AgentState
 from app.core.logger import setup_logger
 from app.services.llm_service import chat_completion, chat_completion_stream_async
@@ -26,6 +31,14 @@ _DEFAULT_ANALYSIS_QUESTIONS = {
     "请对我的简历做全面分析",
     "请帮我分析这份简历",
 }
+
+
+def _followup_generation_config(task_type: str, is_followup: bool) -> tuple[float, int]:
+    if task_type == "match_followup":
+        return 0.3, 900
+    if is_followup:
+        return 0.35, 1100
+    return 0.5, 4096
 
 
 def _is_followup_resume_question(user_question: str, resume_data: dict) -> bool:
@@ -40,6 +53,27 @@ def _is_followup_resume_question(user_question: str, resume_data: dict) -> bool:
         for key in ("summary", "skills", "projects", "experience", "education", "target_position", "name")
     )
     return has_structured_resume
+
+
+def _build_resume_compact_summary(resume_data: dict[str, Any]) -> dict[str, Any]:
+    projects = resume_data.get("projects") or []
+    experience = resume_data.get("experience") or []
+    return {
+        "summary": resume_data.get("summary", ""),
+        "target_position": resume_data.get("target_position", ""),
+        "skills_top": list((resume_data.get("skills") or [])[:10]),
+        "project_names": [item.get("name", "") for item in projects[:3] if isinstance(item, dict) and item.get("name")],
+        "experience_positions": [item.get("position", "") for item in experience[:3] if isinstance(item, dict) and item.get("position")],
+    }
+
+
+def _build_jd_compact_summary(jd_data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "position": jd_data.get("position", ""),
+        "summary": jd_data.get("summary", ""),
+        "skills_must_top": list((jd_data.get("skills_must") or [])[:10]),
+        "keywords_top": list((jd_data.get("keywords") or [])[:10]),
+    }
 
 
 def _build_analysis_messages(state: AgentState) -> tuple[list[dict] | None, bool]:
@@ -64,23 +98,43 @@ def _build_analysis_messages(state: AgentState) -> tuple[list[dict] | None, bool
     if resume_data.get("extract_error"):
         return None, False
 
-    # 序列化 resume_data（去掉 raw_text 避免超长）
-    resume_for_prompt = {k: v for k, v in resume_data.items() if k != "raw_text"}
-    resume_json = json.dumps(resume_for_prompt, ensure_ascii=False, indent=2)
-
-    # JD 上下文（优先使用真实 JD，无则用知识库检索结果）
     jd_data = state.get("jd_data")
-    if jd_data and isinstance(jd_data, dict) and not jd_data.get("extract_error") and working_context:
-        jd_context = working_context
-        logger.info("使用真实 JD 数据进行简历分析")
-    elif working_context:
-        jd_context = working_context
-    else:
-        jd_context = "（知识库中暂无匹配的岗位要求标准，将基于通用后端岗位标准进行评估）"
 
     # 构造 prompt
-    is_followup = _is_followup_resume_question(user_question, resume_data)
-    prompt_template = RESUME_FOLLOWUP_PROMPT if is_followup else RESUME_ANALYSIS_PROMPT
+    task_type = str(state.get("task_type", ""))
+    is_followup = task_type in {"resume_followup", "match_followup"} or _is_followup_resume_question(user_question, resume_data)
+    if task_type == "match_followup":
+        if jd_data and isinstance(jd_data, dict) and not jd_data.get("extract_error"):
+            resume_json = json.dumps(_build_resume_compact_summary(resume_data), ensure_ascii=False, indent=2)
+            jd_context = json.dumps(_build_jd_compact_summary(jd_data), ensure_ascii=False, indent=2)
+            prompt_template = MATCH_FOLLOWUP_DIRECT_PROMPT + "\n\n### 简历摘要\n{resume_data}\n\n### JD 摘要\n{jd_context}\n\n### 用户问题\n{user_question}"
+        else:
+            resume_for_prompt = {k: v for k, v in resume_data.items() if k != "raw_text"}
+            resume_json = json.dumps(resume_for_prompt, ensure_ascii=False, indent=2)
+            jd_context = working_context or "（暂无 JD 摘要）"
+            prompt_template = MATCH_FOLLOWUP_PROMPT
+    elif is_followup:
+        resume_for_prompt = {k: v for k, v in resume_data.items() if k != "raw_text"}
+        resume_json = json.dumps(resume_for_prompt, ensure_ascii=False, indent=2)
+        if jd_data and isinstance(jd_data, dict) and not jd_data.get("extract_error") and working_context:
+            jd_context = working_context
+            logger.info("使用真实 JD 数据进行简历分析")
+        elif working_context:
+            jd_context = working_context
+        else:
+            jd_context = "（知识库中暂无匹配的岗位要求标准，将基于通用后端岗位标准进行评估）"
+        prompt_template = RESUME_FOLLOWUP_PROMPT
+    else:
+        resume_for_prompt = {k: v for k, v in resume_data.items() if k != "raw_text"}
+        resume_json = json.dumps(resume_for_prompt, ensure_ascii=False, indent=2)
+        if jd_data and isinstance(jd_data, dict) and not jd_data.get("extract_error") and working_context:
+            jd_context = working_context
+            logger.info("使用真实 JD 数据进行简历分析")
+        elif working_context:
+            jd_context = working_context
+        else:
+            jd_context = "（知识库中暂无匹配的岗位要求标准，将基于通用后端岗位标准进行评估）"
+        prompt_template = RESUME_ANALYSIS_PROMPT
     prompt = prompt_template.format(
         resume_data=resume_json,
         jd_context=jd_context,
@@ -128,10 +182,12 @@ def generate_analysis(state: AgentState) -> dict:
     )
 
     try:
+        task_type = str(state.get("task_type", ""))
+        temperature, max_tokens = _followup_generation_config(task_type, is_followup)
         answer = chat_completion(
             llm_messages,
-            temperature=0.4 if is_followup else 0.5,
-            max_tokens=1600 if is_followup else 4096,
+            temperature=temperature,
+            max_tokens=max_tokens,
             thinking={"type": "disabled"},
         )
         logger.info("简历分析报告生成完成: %d 字符", len(answer))
@@ -188,10 +244,12 @@ async def generate_analysis_stream(state: AgentState) -> AsyncGenerator[dict[str
 
     full_answer = ""
     try:
+        task_type = str(state.get("task_type", ""))
+        temperature, max_tokens = _followup_generation_config(task_type, is_followup)
         async for delta in chat_completion_stream_async(
             llm_messages,
-            temperature=0.4 if is_followup else 0.5,
-            max_tokens=1600 if is_followup else 4096,
+            temperature=temperature,
+            max_tokens=max_tokens,
             thinking={"type": "disabled"},
         ):
             if delta:

@@ -85,20 +85,17 @@ def supervisor_plan_node(state: AgentState, *, web_search_available: bool = Fals
     resume_data = state.get("resume_data")
     jd_data = state.get("jd_data")
 
-    if task_type == "jd_analysis":
+    if task_type in {"jd_analysis", "jd_followup"}:
         execution_plan = ["jd_expert", "respond"]
-    elif task_type == "resume_analysis":
-        if _infer_resume_jd_chain(question, has_jd_data):
-            execution_plan = ["resume_expert", "respond"]
-        else:
-            execution_plan = ["resume_expert", "respond"]
+    elif task_type in {"resume_analysis", "resume_followup", "match_followup"}:
+        execution_plan = ["resume_expert", "respond"]
     else:
         execution_plan = ["qa_flow", "respond"]
 
     # 已有简历和 JD，且用户明显在做匹配分析时，优先走简历专家复用现有 jd_data
     if task_type == "qa" and has_jd_data and has_resume_data and _infer_resume_jd_chain(question, has_jd_data):
         execution_plan = ["resume_expert", "respond"]
-        task_type = "resume_analysis"
+        task_type = "match_followup"
 
     active_agent = _normalize_agent_name(execution_plan[0] if execution_plan else "respond") or "respond"
     _emit_custom_event({"type": "agent_start", "agent": active_agent})
@@ -115,8 +112,8 @@ def supervisor_plan_node(state: AgentState, *, web_search_available: bool = Fals
         "active_agent": active_agent,
         "final_response_ready": active_agent == "respond",
         "agent_outputs": state.get("agent_outputs", {}),
-        "resume_data": resume_data if resume_data else ({"raw_text": question} if task_type == "resume_analysis" and question else None),
-        "jd_data": jd_data if jd_data else ({"raw_text": question} if task_type == "jd_analysis" and question else None),
+        "resume_data": resume_data if resume_data else ({"raw_text": question} if task_type in {"resume_analysis", "resume_followup", "match_followup"} and question else None),
+        "jd_data": jd_data if jd_data else ({"raw_text": question} if task_type in {"jd_analysis", "jd_followup"} and question else None),
     }
 
 
@@ -223,10 +220,12 @@ def generate_final_node(state: AgentState) -> dict:
         },
     ]
 
+    task_type = str(state.get("task_type", ""))
+    max_tokens = 900 if task_type in {"jd_followup", "resume_followup", "match_followup"} else 2048
     answer = chat_completion(
         summary_messages,
         temperature=0.3,
-        max_tokens=2048,
+        max_tokens=max_tokens,
         thinking={"type": "disabled"},
     )
     return {"final_answer": answer, "messages": [AIMessage(content=answer)]}

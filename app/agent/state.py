@@ -24,6 +24,9 @@ class TaskType(str, Enum):
     QA = "qa"
     RESUME_ANALYSIS = "resume_analysis"
     JD_ANALYSIS = "jd_analysis"
+    JD_FOLLOWUP = "jd_followup"
+    RESUME_FOLLOWUP = "resume_followup"
+    MATCH_FOLLOWUP = "match_followup"
 
 
 class RouteDecision(BaseModel):
@@ -54,7 +57,7 @@ class AgentState(TypedDict, total=False):
 
     # ---- 路由决策（存储字符串值，避免 msgpack 序列化问题）----
     route_type: str  # "retrieve" | "web" | "direct"
-    task_type: str   # "qa" | "resume_analysis"
+    task_type: str   # "qa" | "resume_analysis" | "jd_analysis" | "jd_followup" | "resume_followup" | "match_followup"
     active_agent: str | None
     execution_plan: list[str]
     current_step: int
