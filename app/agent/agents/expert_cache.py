@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 
@@ -48,9 +49,48 @@ def _latest_user_question(messages: list[Any]) -> str:
     return ""
 
 
+def _normalize_question_signature(task_type: str, question: str) -> str:
+    q = (question or "").strip().lower()
+    if not q:
+        return "empty"
+
+    if task_type == "jd_followup":
+        if "面试" in q:
+            return "jd_followup:interview"
+        if any(k in q for k in ("技术栈", "技能", "能力")):
+            return "jd_followup:skills"
+        if any(k in q for k in ("优先", "重点", "最需要")):
+            return "jd_followup:priority"
+        return "jd_followup:generic"
+
+    if task_type == "resume_followup":
+        if any(k in q for k in ("优化", "润色", "改写", "重写")):
+            return "resume_followup:optimize"
+        if any(k in q for k in ("亮点", "优势", "突出")):
+            return "resume_followup:strengths"
+        if any(k in q for k in ("怎么写", "如何写")):
+            return "resume_followup:writing"
+        return "resume_followup:generic"
+
+    if task_type == "match_followup":
+        if any(k in q for k in ("缺", "差距", "缺口", "不足")):
+            return "match_followup:gap"
+        if any(k in q for k in ("优先", "最需要", "先补", "先学")):
+            return "match_followup:priority"
+        if any(k in q for k in ("匹配", "匹配度")):
+            return "match_followup:match"
+        return "match_followup:generic"
+
+    compact = re.sub(r"\s+", " ", q)
+    return compact[:200]
+
+
 def build_resume_expert_cache_key(state: dict[str, Any]) -> str:
+    task_type = str(state.get("task_type", ""))
+    question = _latest_user_question(state.get("messages", []))
     payload = {
-        "question": _latest_user_question(state.get("messages", [])),
+        "task_type": task_type,
+        "question_signature": _normalize_question_signature(task_type, question),
         "resume_data": _trim_resume_payload(state.get("resume_data")),
         "jd_data": _trim_jd_payload(state.get("jd_data")),
     }
@@ -58,8 +98,11 @@ def build_resume_expert_cache_key(state: dict[str, Any]) -> str:
 
 
 def build_jd_expert_cache_key(state: dict[str, Any]) -> str:
+    task_type = str(state.get("task_type", ""))
+    question = _latest_user_question(state.get("messages", []))
     payload = {
-        "question": _latest_user_question(state.get("messages", [])),
+        "task_type": task_type,
+        "question_signature": _normalize_question_signature(task_type, question),
         "jd_data": _trim_jd_payload(state.get("jd_data")),
         "resume_data": _trim_resume_payload(state.get("resume_data")),
     }

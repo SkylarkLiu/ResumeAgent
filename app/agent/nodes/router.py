@@ -98,38 +98,44 @@ def _rule_based_followup_route(question: str, state: AgentState, web_search_avai
         "该岗位",
         "这个jd",
         "这个 jd",
+        "面试准备",
+        "面试阶段",
+        "岗位重点",
+        "岗位要求",
+        "技术栈",
     )
-    resume_keywords = ("简历", "匹配度", "匹配", "评估", "优化", "修改简历", "改简历", "简历建议", "是否匹配")
+    resume_keywords = ("简历", "评估", "优化", "修改简历", "改简历", "简历建议", "润色", "重写")
+    match_keywords = ("匹配度", "匹配", "是否匹配", "缺少什么", "差距", "缺口", "对比jd", "对比 jd", "改进什么", "补什么", "最该补", "最需要改进")
     latest_keywords = ("最新", "今天", "本周", "最近", "2026", "实时", "新闻")
 
-    if has_jd_data and (_is_resume_like_text(question) or (has_resume_data and any(k in q for k in resume_keywords))):
+    if has_jd_data and (_is_resume_like_text(question) or (has_resume_data and any(k in q for k in match_keywords))):
         return {
             "route_type": RouteType.DIRECT.value,
-            "task_type": TaskType.RESUME_ANALYSIS.value,
-            "messages": [AIMessage(content="[路由决策] 已有 JD 上下文，识别为简历评估/匹配场景，走 resume_analysis")],
+            "task_type": TaskType.MATCH_FOLLOWUP.value if has_resume_data else TaskType.RESUME_ANALYSIS.value,
+            "messages": [AIMessage(content="[路由决策] 已有 JD 上下文，识别为简历评估/匹配场景，走匹配分析路径")],
         }
 
-    if has_jd_data and any(k in q for k in resume_keywords):
+    if has_resume_data and any(k in q for k in resume_keywords):
         return {
             "route_type": RouteType.DIRECT.value,
-            "task_type": TaskType.RESUME_ANALYSIS.value,
-            "messages": [AIMessage(content="[路由决策] 已有 JD 上下文且用户在做简历/匹配分析，走 resume_analysis")],
+            "task_type": TaskType.RESUME_FOLLOWUP.value,
+            "messages": [AIMessage(content="[路由决策] 识别为基于已有简历的优化追问，走 resume_followup")],
         }
 
     if has_jd_data and any(k in q for k in jd_followup_keywords):
         return {
             "route_type": RouteType.DIRECT.value,
-            "task_type": TaskType.QA.value,
-            "messages": [AIMessage(content="[路由决策] 基于已存在 JD 上下文，走 direct 路径继续回答")],
+            "task_type": TaskType.JD_FOLLOWUP.value,
+            "messages": [AIMessage(content="[路由决策] 基于已存在 JD 上下文，走 jd_followup")],
         }
 
     if any(k in q for k in latest_keywords):
         route_type = RouteType.WEB.value if web_search_available else RouteType.RETRIEVE.value
         return {
             "route_type": route_type,
-            "task_type": TaskType.QA.value,
-            "messages": [AIMessage(content=f"[路由决策] 时效性问题，走 {route_type} 路径")],
-        }
+        "task_type": TaskType.QA.value,
+        "messages": [AIMessage(content=f"[路由决策] 时效性问题，走 {route_type} 路径")],
+    }
 
     return None
 

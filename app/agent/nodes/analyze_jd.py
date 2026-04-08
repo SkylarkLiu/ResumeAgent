@@ -27,6 +27,12 @@ _DEFAULT_ANALYSIS_QUESTIONS = {
 }
 
 
+def _jd_generation_config(is_followup: bool) -> tuple[float, int]:
+    if is_followup:
+        return 0.35, 1100
+    return 0.5, 4096
+
+
 def _is_followup_jd_question(user_question: str, jd_data: dict) -> bool:
     """判断当前问题是否为 JD 追问（而非首次完整分析请求）。"""
     q = (user_question or "").strip()
@@ -67,7 +73,8 @@ def _build_jd_analysis_messages(state: AgentState) -> tuple[list[dict] | None, b
     jd_json = json.dumps(jd_for_prompt, ensure_ascii=False, indent=2)
 
     # 判断是否追问
-    is_followup = _is_followup_jd_question(user_question, jd_data)
+    task_type = str(state.get("task_type", ""))
+    is_followup = task_type == "jd_followup" or _is_followup_jd_question(user_question, jd_data)
 
     if is_followup:
         prompt = JD_FOLLOWUP_PROMPT.format(jd_data=jd_json, user_question=user_question)
@@ -116,10 +123,11 @@ def analyze_jd(state: AgentState) -> dict:
     )
 
     try:
+        temperature, max_tokens = _jd_generation_config(is_followup)
         answer = chat_completion(
             llm_messages,
-            temperature=0.4 if is_followup else 0.5,
-            max_tokens=1600 if is_followup else 4096,
+            temperature=temperature,
+            max_tokens=max_tokens,
             thinking={"type": "disabled"},
         )
         logger.info("JD 分析报告生成完成: %d 字符", len(answer))
@@ -177,10 +185,11 @@ async def analyze_jd_stream(state: AgentState) -> AsyncGenerator[dict[str, Any],
 
     full_answer = ""
     try:
+        temperature, max_tokens = _jd_generation_config(is_followup)
         async for delta in chat_completion_stream_async(
             llm_messages,
-            temperature=0.4 if is_followup else 0.5,
-            max_tokens=1600 if is_followup else 4096,
+            temperature=temperature,
+            max_tokens=max_tokens,
             thinking={"type": "disabled"},
         ):
             if delta:

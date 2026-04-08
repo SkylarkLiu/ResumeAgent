@@ -64,6 +64,23 @@ def _extract_resume_node(state: ResumeAnalysisState) -> dict:
 
 def _resolve_jd_context_node(state: ResumeAnalysisState) -> dict:
     """解析 JD 上下文并发送 sources 事件。"""
+    existing_sources = state.get("context_sources") or []
+    existing_context = state.get("working_context", "")
+    jd_data = state.get("jd_data") or {}
+    has_structured_jd = any(
+        jd_data.get(key)
+        for key in ("position", "summary", "skills_must", "responsibilities", "requirements")
+    ) and not jd_data.get("extract_error")
+
+    if has_structured_jd and existing_sources and existing_context:
+        _emit_custom_event({"type": "status", "content": "正在复用已保存岗位上下文"})
+        _emit_custom_event({"type": "sources", "sources": existing_sources})
+        logger.info("复用已有 JD 上下文，跳过重复解析")
+        return {
+            "context_sources": existing_sources,
+            "working_context": existing_context,
+        }
+
     result = retrieve_jd(state)
     _emit_custom_event({"type": "sources", "sources": result.get("context_sources", [])})
     return result

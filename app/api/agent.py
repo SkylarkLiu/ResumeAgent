@@ -96,7 +96,7 @@ def _sse_event(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _build_chat_turn_input_state(question: str) -> dict[str, Any]:
+def _build_chat_turn_input_state(question: str, session_values: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     为每一轮新的 chat 请求构造初始状态。
 
@@ -106,10 +106,11 @@ def _build_chat_turn_input_state(question: str) -> dict[str, Any]:
     - execution_plan / current_step / active_agent 等计划态必须每轮重置，
       否则会错误复用上一轮的调度结果
     """
+    session_values = session_values or {}
     return {
         "messages": [HumanMessage(content=question)],
-        "context_sources": [],
-        "working_context": "",
+        "context_sources": session_values.get("context_sources", []),
+        "working_context": session_values.get("working_context", ""),
         "final_answer": "",
         "execution_plan": [],
         "current_step": 0,
@@ -294,7 +295,8 @@ async def agent_chat(request: AgentChatRequest):
 
     config = {"configurable": {"thread_id": session_id}}
 
-    input_state = _build_chat_turn_input_state(question)
+    session_values = await _load_session_values(session_id)
+    input_state = _build_chat_turn_input_state(question, session_values)
 
     try:
         result = await _agent_graph.ainvoke(input_state, config=config)
@@ -363,7 +365,8 @@ async def agent_chat_stream(request: AgentChatRequest):
         try:
             logger.info("Agent 流式请求: thread=%s, question=%s", session_id, question[:50])
 
-            input_state = _build_chat_turn_input_state(question)
+            session_values = await _load_session_values(session_id)
+            input_state = _build_chat_turn_input_state(question, session_values)
 
             route_str = "direct"
             task_str = "qa"
