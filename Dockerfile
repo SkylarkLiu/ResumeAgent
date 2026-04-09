@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -6,20 +6,30 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 ARG DEBIAN_MIRROR=mirrors.aliyun.com
+ARG DEBIAN_MIRROR_SCHEME=http
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-
-RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i "s|http://deb.debian.org|https://${DEBIAN_MIRROR}|g; s|http://security.debian.org|https://${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
-    elif [ -f /etc/apt/sources.list ]; then \
-        sed -i "s|http://deb.debian.org|https://${DEBIAN_MIRROR}|g; s|http://security.debian.org|https://${DEBIAN_MIRROR}|g" /etc/apt/sources.list; \
-    fi \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+ARG PIP_FALLBACK_INDEX_URL=https://pypi.org/simple
+ARG PIP_DEFAULT_TIMEOUT=180
+ARG PIP_RETRIES=10
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} -r requirements.txt
+RUN sh -c '\
+    pip install \
+        --no-cache-dir \
+        --disable-pip-version-check \
+        --prefer-binary \
+        --default-timeout "${PIP_DEFAULT_TIMEOUT}" \
+        --retries "${PIP_RETRIES}" \
+        -i "${PIP_INDEX_URL}" \
+        -r requirements.txt \
+    || pip install \
+        --no-cache-dir \
+        --disable-pip-version-check \
+        --prefer-binary \
+        --default-timeout "${PIP_DEFAULT_TIMEOUT}" \
+        --retries "${PIP_RETRIES}" \
+        -i "${PIP_FALLBACK_INDEX_URL}" \
+        -r requirements.txt'
 
 COPY . .
 

@@ -107,24 +107,47 @@ async def ingest_file(file: UploadFile):
             embeddings = embed_texts(texts)
 
             # 6. 入库
+            from app.repositories.metadata_store import ChunkPayload
             from app.repositories.vector_store import VectorRecord
 
+            if vector_store.metadata_store is None:
+                raise RuntimeError("metadata store 未初始化")
+
+            chunk_payloads = [
+                ChunkPayload(
+                    content=doc.page_content,
+                    source=filename,
+                    page=doc.metadata.get("page"),
+                    chunk_index=i,
+                    metadata=doc.metadata,
+                )
+                for i, doc in enumerate(docs)
+            ]
+            chunk_ids = vector_store.metadata_store.upsert_document_chunks(
+                source_name=filename,
+                chunks=chunk_payloads,
+            )
             records = [
                 VectorRecord(
-                    id=f"{filename}_{i}",
-                    content=doc.page_content,
+                    id=str(chunk_id),
                     embedding=emb,
+                    content=doc.page_content,
                     source=filename,
                     page=doc.metadata.get("page"),
                     metadata=doc.metadata,
                 )
-                for i, (doc, emb) in enumerate(zip(docs, embeddings))
+                for chunk_id, doc, emb in zip(chunk_ids, docs, embeddings)
             ]
 
             vector_store.add_records(records)
             vector_store.save()
-            logger.info("入库完成: %d 条 -> FAISS", len(records))
+            logger.info("入库完成: %d 条 -> PostgreSQL + FAISS", len(records))
         except Exception as e:
+            if vector_store is not None and vector_store.metadata_store is not None:
+                try:
+                    vector_store.metadata_store.delete_by_source(filename)
+                except Exception:
+                    logger.warning("回滚 metadata 失败: %s", filename, exc_info=True)
             logger.error("Embedding/入库失败: %s - %s", filename, e, exc_info=True)
             raise HTTPException(status_code=500, detail=f"向量化入库失败: {str(e)}")
 
@@ -153,7 +176,7 @@ async def list_files():
 
 
 @router.get("/sources")
-async def list_sources():
+async def list_sources(source_type: str | None = None, category: str | None = None):
     """
     返回知识库向量存储中所有不重复的来源文件名。
     用于查看实际入库了哪些文件，可用于删除时参考。
@@ -161,8 +184,49 @@ async def list_sources():
     if vector_store is None:
         raise HTTPException(status_code=503, detail="向量存储未初始化")
 
-    sources = vector_store.get_sources()
+    if vector_store.metadata_store is not None:
+        sources = vector_store.metadata_store.list_sources(
+            source_type=source_type,
+            category=category,
+        )
+    else:
+        sources = vector_store.get_sources()
     return {"sources": sources}
+
+
+@router.get("/documents")
+async def list_documents(source_type: str | None = None, category: str | None = None):
+    """返回 PostgreSQL metadata 中的逻辑文档列表。"""
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="向量存储未初始化")
+    if vector_store.metadata_store is None:
+        raise HTTPException(status_code=503, detail="metadata store 未初始化")
+
+    documents = vector_store.metadata_store.list_documents(
+        source_type=source_type,
+        category=category,
+    )
+    return {"documents": documents}
+
+
+@router.post("/compact")
+async def compact_index():
+    """
+    手动压缩 FAISS 索引，清除已在 metadata 中删除的失效 row。
+    """
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="向量存储未初始化")
+
+    try:
+        result = vector_store.compact()
+    except Exception as e:
+        logger.error("FAISS compact 失败: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"FAISS compact 失败: {str(e)}")
+
+    return {
+        "message": "FAISS compact 完成",
+        **result,
+    }
 
 
 @router.delete("/file/{filename}")

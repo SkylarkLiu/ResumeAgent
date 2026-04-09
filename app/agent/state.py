@@ -58,6 +58,9 @@ class AgentState(TypedDict, total=False):
     # ---- 路由决策（存储字符串值，避免 msgpack 序列化问题）----
     route_type: str  # "retrieve" | "web" | "direct"
     task_type: str   # "qa" | "resume_analysis" | "jd_analysis" | "jd_followup" | "resume_followup" | "match_followup"
+    question_signature: str
+    planning_reason: str
+    response_mode: str  # "full_report" | "followup_brief" | "match_brief" | "direct_answer"
     active_agent: str | None
     execution_plan: list[str]
     current_step: int
@@ -78,6 +81,10 @@ class AgentState(TypedDict, total=False):
     # 输入阶段: {"raw_text": str}（JD 原文）
     # 提取后: {"position", "company", "skills_must", "tech_stack", "summary", ...}
     jd_data: dict | None
+
+    # ---- 检索降级标记 ----
+    # 当 KB 检索结果质量不足时，标记为 True，触发降级到 web search
+    retrieval_fallback: bool
 
     # ---- 最终输出 ----
     final_answer: str

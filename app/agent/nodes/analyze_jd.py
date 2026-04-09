@@ -27,8 +27,8 @@ _DEFAULT_ANALYSIS_QUESTIONS = {
 }
 
 
-def _jd_generation_config(is_followup: bool) -> tuple[float, int]:
-    if is_followup:
+def _jd_generation_config(mode: str, is_followup: bool) -> tuple[float, int]:
+    if mode == "followup_brief" or is_followup:
         return 0.35, 1100
     return 0.5, 4096
 
@@ -74,7 +74,8 @@ def _build_jd_analysis_messages(state: AgentState) -> tuple[list[dict] | None, b
 
     # 判断是否追问
     task_type = str(state.get("task_type", ""))
-    is_followup = task_type == "jd_followup" or _is_followup_jd_question(user_question, jd_data)
+    response_mode = str(state.get("response_mode", ""))
+    is_followup = response_mode == "followup_brief" or task_type == "jd_followup" or _is_followup_jd_question(user_question, jd_data)
 
     if is_followup:
         prompt = JD_FOLLOWUP_PROMPT.format(jd_data=jd_json, user_question=user_question)
@@ -123,7 +124,8 @@ def analyze_jd(state: AgentState) -> dict:
     )
 
     try:
-        temperature, max_tokens = _jd_generation_config(is_followup)
+        mode = str(state.get("response_mode") or state.get("task_type", ""))
+        temperature, max_tokens = _jd_generation_config(mode, is_followup)
         answer = chat_completion(
             llm_messages,
             temperature=temperature,
@@ -185,7 +187,8 @@ async def analyze_jd_stream(state: AgentState) -> AsyncGenerator[dict[str, Any],
 
     full_answer = ""
     try:
-        temperature, max_tokens = _jd_generation_config(is_followup)
+        mode = str(state.get("response_mode") or state.get("task_type", ""))
+        temperature, max_tokens = _jd_generation_config(mode, is_followup)
         async for delta in chat_completion_stream_async(
             llm_messages,
             temperature=temperature,

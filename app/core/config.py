@@ -30,14 +30,20 @@ class Settings(BaseSettings):
     top_k: int = 5
     chunk_size: int = 500
     chunk_overlap: int = 50
+    kb_relevance_threshold: float = 0.35  # KB 检索最高分低于此值时降级到 web search
 
     # ---- 服务 ----
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
+    app_env: str = "development"  # development | staging | production
+    debug_mode: bool = False  # 仅开发环境开启 /debug/runtime
 
     # ---- Checkpointer / 持久化 ----
     checkpoint_db_url: str = ""
+    expert_cache_backend: str = "state_checkpointer"  # state_checkpointer | postgres
+    expert_cache_db_url: str = ""
+    metadata_db_url: str = ""
 
     # ---- 文件上传限制 ----
     max_upload_size_mb: int = 50

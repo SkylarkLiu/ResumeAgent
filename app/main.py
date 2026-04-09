@@ -11,10 +11,21 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router as chat_router, set_rag_service
 from app.api.ingest import router as ingest_router, set_vector_store
-from app.agent import build_agent_graph, get_checkpointer, get_checkpointer_backend, init_checkpointer, shutdown_checkpointer
+from app.agent import (
+    build_agent_graph,
+    get_cache_store_backend,
+    get_checkpointer,
+    get_checkpointer_backend,
+    init_cache_store,
+    init_checkpointer,
+    shutdown_cache_store,
+    shutdown_checkpointer,
+)
 from app.api.agent import router as agent_router, set_agent_graph, set_checkpointer
+from app.api.debug import router as debug_router
 from app.core.config import get_settings
 from app.core.logger import setup_logger
+from app.repositories.metadata_store import PostgresMetadataStore
 from app.repositories.vector_store import FAISSVectorStore
 from app.services.rag_service import RAGService
 from app.services.retrieval_service import RetrievalService
@@ -26,20 +37,34 @@ settings = get_settings()
 # 全局向量存储和 RAG 服务
 _store: FAISSVectorStore | None = None
 _rag: RAGService | None = None
+_metadata_store: PostgresMetadataStore | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时加载/创建索引，关闭时保存"""
-    global _store, _rag
+    global _store, _rag, _metadata_store
 
     logger.info("=" * 50)
     logger.info("多模态文档问答助手 V2 启动中... (LangGraph checkpointer)")
     logger.info("=" * 50)
 
+    # 初始化 metadata store
+    _metadata_store = PostgresMetadataStore(settings=settings)
+    _metadata_store.setup()
+
     # 初始化向量存储
-    _store = FAISSVectorStore(index_dir=settings.faiss_index_dir)
+    _store = FAISSVectorStore(
+        index_dir=settings.faiss_index_dir,
+        metadata_store=_metadata_store,
+    )
     loaded = _store.load()
+
+    if not loaded and _store.has_legacy_metadata():
+        if _metadata_store.is_available:
+            loaded = _store.migrate_legacy_metadata()
+        else:
+            logger.warning("检测到旧 metadata.json，但 metadata_db_url / checkpoint_db_url 未配置，暂时跳过迁移")
 
     if loaded:
         logger.info("已加载已有索引: %d 条记录", _store.total)
@@ -55,7 +80,13 @@ async def lifespan(app: FastAPI):
 
     # ---- 初始化 Agent 模块 ----
     await init_checkpointer(settings)
+    await init_cache_store(settings)
     logger.info("初始化 Agent 模块 (checkpointer=%s)...", get_checkpointer_backend())
+    logger.info("初始化 Expert Cache (backend=%s)...", get_cache_store_backend())
+    logger.info(
+        "初始化 Metadata Store (backend=%s)...",
+        "postgres" if _metadata_store.is_available else "disabled",
+    )
 
     # 检索服务（复用现有 vector_store）
     retrieval_service = RetrievalService(_store)
@@ -89,6 +120,7 @@ async def lifespan(app: FastAPI):
     if _store and not _store.is_empty():
         _store.save()
         logger.info("索引已保存")
+    await shutdown_cache_store()
     await shutdown_checkpointer()
 
 
@@ -113,6 +145,8 @@ app.add_middleware(
 app.include_router(ingest_router)
 app.include_router(chat_router)
 app.include_router(agent_router)
+if settings.debug_mode:
+    app.include_router(debug_router)
 
 # 挂载静态文件（前端页面）
 static_dir = "static"
@@ -138,4 +172,6 @@ async def health():
         "status": "ok",
         "index_records": _store.total if _store else 0,
         "checkpointer_backend": get_checkpointer_backend(),
+        "expert_cache_backend": get_cache_store_backend(),
+        "metadata_store_backend": "postgres" if _metadata_store and _metadata_store.is_available else "disabled",
     }

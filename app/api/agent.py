@@ -96,7 +96,7 @@ def _sse_event(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _build_chat_turn_input_state(question: str, session_values: dict[str, Any] | None = None) -> dict[str, Any]:
+def _build_chat_turn_input_state(question: str, session_id: str, session_values: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     为每一轮新的 chat 请求构造初始状态。
 
@@ -108,6 +108,7 @@ def _build_chat_turn_input_state(question: str, session_values: dict[str, Any] |
     """
     session_values = session_values or {}
     return {
+        "session_id": session_id,
         "messages": [HumanMessage(content=question)],
         "context_sources": session_values.get("context_sources", []),
         "working_context": session_values.get("working_context", ""),
@@ -150,6 +151,7 @@ async def _persist_analysis_state(
     try:
         config = {"configurable": {"thread_id": session_id}}
         update_payload = dict(extra_state or {})
+        update_payload["session_id"] = session_id
         task_type = str(update_payload.get("task_type", ""))
         as_node = (
             "resume_expert" if task_type == "resume_analysis"
@@ -197,6 +199,7 @@ async def _resume_stream_event_generator(
         config = {"configurable": {"thread_id": session_id}}
         session_values = await _load_session_values(session_id)
         input_state = {
+            "session_id": session_id,
             "messages": [HumanMessage(content=question)],
             "context_sources": [],
             "working_context": "",
@@ -296,7 +299,7 @@ async def agent_chat(request: AgentChatRequest):
     config = {"configurable": {"thread_id": session_id}}
 
     session_values = await _load_session_values(session_id)
-    input_state = _build_chat_turn_input_state(question, session_values)
+    input_state = _build_chat_turn_input_state(question, session_id, session_values)
 
     try:
         result = await _agent_graph.ainvoke(input_state, config=config)
@@ -366,10 +369,12 @@ async def agent_chat_stream(request: AgentChatRequest):
             logger.info("Agent 流式请求: thread=%s, question=%s", session_id, question[:50])
 
             session_values = await _load_session_values(session_id)
-            input_state = _build_chat_turn_input_state(question, session_values)
+            input_state = _build_chat_turn_input_state(question, session_id, session_values)
 
             route_str = "direct"
             task_str = "qa"
+            question_signature = ""
+            response_mode = ""
             final_answer = ""
             sources_sent = False
 
@@ -387,7 +392,27 @@ async def agent_chat_stream(request: AgentChatRequest):
                     elif event_type == "agent_result":
                         yield _sse_event({"type": "agent_result", "agent": payload.get("agent", "")})
                     elif event_type == "agent_cache_hit":
-                        yield _sse_event({"type": "agent_cache_hit", "agent": payload.get("agent", "")})
+                        yield _sse_event({
+                            "type": "agent_cache_hit",
+                            "agent": payload.get("agent", ""),
+                            "task": payload.get("task_type", ""),
+                            "question_signature": payload.get("question_signature", ""),
+                            "response_mode": payload.get("response_mode", ""),
+                            "backend": payload.get("backend", ""),
+                            "hit_count": payload.get("hit_count", 0),
+                            "cached_at": payload.get("cached_at", ""),
+                        })
+                    elif event_type == "planning":
+                        question_signature = payload.get("question_signature", question_signature)
+                        response_mode = payload.get("response_mode", response_mode)
+                        yield _sse_event({
+                            "type": "planning",
+                            "task": payload.get("task_type", ""),
+                            "route": payload.get("route_type", ""),
+                            "question_signature": payload.get("question_signature", ""),
+                            "response_mode": payload.get("response_mode", ""),
+                            "planning_reason": payload.get("planning_reason", ""),
+                        })
                     elif event_type == "status":
                         yield _sse_event({"type": "status", "content": payload.get("content", "")})
                     elif event_type == "sources":
@@ -407,7 +432,15 @@ async def agent_chat_stream(request: AgentChatRequest):
                         task_type = payload["supervisor_plan"].get("task_type", task_str)
                         route_str = route_type.value if hasattr(route_type, "value") else str(route_type)
                         task_str = task_type.value if hasattr(task_type, "value") else str(task_type)
-                        logger.info("路由决策: route=%s, task=%s", route_str, task_str)
+                        question_signature = str(payload["supervisor_plan"].get("question_signature", question_signature))
+                        response_mode = str(payload["supervisor_plan"].get("response_mode", response_mode))
+                        logger.info(
+                            "路由决策: route=%s, task=%s, signature=%s, mode=%s",
+                            route_str,
+                            task_str,
+                            question_signature,
+                            response_mode,
+                        )
                         yield _sse_event({"type": "route", "route": route_str, "task": task_str})
                         if route_str == "direct" and not sources_sent:
                             yield _sse_event({"type": "sources", "sources": []})
@@ -428,9 +461,11 @@ async def agent_chat_stream(request: AgentChatRequest):
             yield _sse_event({"type": "done", "session_id": session_id, "answer": final_answer})
 
             logger.info(
-                "Agent 流式回复完成: thread=%s, route=%s, answer=%d字符",
+                "Agent 流式回复完成: thread=%s, route=%s, signature=%s, mode=%s, answer=%d字符",
                 session_id,
                 route_str,
+                question_signature,
+                response_mode,
                 len(final_answer),
             )
 
@@ -598,6 +633,7 @@ async def _jd_stream_event_generator(
         config = {"configurable": {"thread_id": session_id}}
         session_values = await _load_session_values(session_id)
         input_state = {
+            "session_id": session_id,
             "messages": [HumanMessage(content=question)],
             "context_sources": [],
             "working_context": "",

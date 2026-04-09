@@ -69,7 +69,11 @@ def build_agent_graph(
         编译后的 CompiledGraph（带 checkpointer）
     """
     # ---- 注入依赖到各节点 ----
-    set_retrieval_service(retrieval_service, top_k=settings.top_k)
+    set_retrieval_service(
+        retrieval_service,
+        top_k=settings.top_k,
+        kb_relevance_threshold=settings.kb_relevance_threshold,
+    )
     set_retrieval_service_jd(retrieval_service, top_k=settings.top_k)
     set_web_search_service(web_search_service, max_results=settings.web_search_max_results)
     set_max_history(settings.agent_max_history)

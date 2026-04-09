@@ -258,28 +258,126 @@ function buildAgentTimelineHtml(agentSteps) {
     return `<div class="agent-timeline">${items}</div>`;
 }
 
-function renderAiMessageContent({ routeType, fullAnswer, currentSources, agentSteps }) {
+function buildPlanningMetaHtml(planningMeta) {
+    if (!planningMeta || (!planningMeta.task && !planningMeta.questionSignature && !planningMeta.responseMode)) {
+        return '';
+    }
+
+    const taskLabels = {
+        qa: '普通问答',
+        resume_analysis: '简历分析',
+        jd_analysis: '岗位分析',
+        jd_followup: 'JD 追问',
+        resume_followup: '简历追问',
+        match_followup: '匹配追问'
+    };
+
+    let html = '<div class="planning-meta">';
+    if (planningMeta.task) {
+        html += `<span class="planning-badge">${escapeHtml(taskLabels[planningMeta.task] || planningMeta.task)}</span>`;
+    }
+    if (planningMeta.questionSignature) {
+        html += `<span class="planning-badge subtle">${escapeHtml(planningMeta.questionSignature)}</span>`;
+    }
+    if (planningMeta.responseMode) {
+        html += `<span class="planning-badge subtle">${escapeHtml(planningMeta.responseMode)}</span>`;
+    }
+    html += '</div>';
+    return html;
+}
+
+function getCacheHitStatusText(payload, planningMeta) {
+    const task = payload.task || planningMeta?.task || '';
+    const mode = payload.response_mode || planningMeta?.responseMode || '';
+    const signature = payload.question_signature || planningMeta?.questionSignature || '';
+
+    if (task === 'match_followup') {
+        return '命中匹配分析缓存';
+    }
+    if (task === 'resume_followup') {
+        return '命中简历追问缓存';
+    }
+    if (task === 'jd_followup') {
+        return '命中岗位追问缓存';
+    }
+    if (payload.agent === 'resume_expert') {
+        return mode === 'match_brief' || signature.startsWith('match_followup:')
+            ? '复用简历与岗位上下文'
+            : '复用已有简历分析结果';
+    }
+    if (payload.agent === 'jd_expert') {
+        return '复用已有岗位分析结果';
+    }
+    return '复用已有结果';
+}
+
+function buildCacheHintText(payload) {
+    const parts = [];
+    if (payload.backend) {
+        parts.push(`backend: ${payload.backend}`);
+    }
+    if (payload.hit_count) {
+        parts.push(`hits: ${payload.hit_count}`);
+    }
+    return parts.join(' · ');
+}
+
+// 可观测性标签构建
+function buildObsTagsHtml(obsMeta) {
+    if (!obsMeta || obsMeta.length === 0) return '';
+    const icons = {
+        cache_hit: '💾',
+        reuse_jd: '🔗',
+        reuse_resume: '📎',
+        followup_brief: '⚡',
+        dedup_extract: '⏭️',
+        kb_low_relevance: '🔄',
+    };
+    const labels = {
+        cache_hit: '命中缓存',
+        reuse_jd: '复用 JD 上下文',
+        reuse_resume: '复用简历结构化',
+        followup_brief: 'Follow-up 短答',
+        dedup_extract: '跳过重复提取',
+        kb_low_relevance: 'KB 降级搜索',
+    };
+    const items = obsMeta.map(tag => {
+        const icon = icons[tag.type] || 'ℹ️';
+        const label = labels[tag.type] || tag.type;
+        let detail = '';
+        if (tag.detail) detail = ` <span class="obs-detail">${escapeHtml(tag.detail)}</span>`;
+        return `<span class="obs-tag ${tag.type}">${icon} ${label}${detail}</span>`;
+    }).join('');
+    return `<div class="obs-tags">${items}</div>`;
+}
+
+function renderAiMessageContent({ routeType, fullAnswer, currentSources, agentSteps, planningMeta, obsMeta }) {
     const routeLabels = {
         kb: '📚 知识库',
         web: '🌐 网络',
         direct: '💬 直接回答',
         resume_analysis: '📋 简历分析',
-        jd_analysis: '🎯 岗位分析'
+        jd_analysis: '🎯 岗位分析',
+        jd_followup: '🎯 JD 追问',
+        resume_followup: '📋 简历追问',
+        match_followup: '🧩 匹配追问'
     };
 
     const routeHtml = routeType ? `<span class="route-tag ${routeType}">${routeLabels[routeType] || routeType}</span><br>` : '';
+    const planningHtml = buildPlanningMetaHtml(planningMeta);
+    const obsHtml = buildObsTagsHtml(obsMeta);
     const timelineHtml = buildAgentTimelineHtml(agentSteps);
     const sourcesHtml = currentSources.length > 0 ? buildSourcesHtml(currentSources) : '';
 
     if (!fullAnswer) {
-        return routeHtml + timelineHtml + sourcesHtml;
+        return routeHtml + planningHtml + obsHtml + timelineHtml + sourcesHtml;
     }
 
     try {
-        return routeHtml + timelineHtml + renderMarkdown(fullAnswer) + sourcesHtml;
+        return routeHtml + planningHtml + obsHtml + timelineHtml + renderMarkdown(fullAnswer) + sourcesHtml;
     } catch (renderErr) {
         console.warn('Markdown 渲染异常，降级为纯文本:', renderErr);
-        return routeHtml + timelineHtml + '<p>' + escapeHtml(fullAnswer) + '</p>' + sourcesHtml;
+        return routeHtml + planningHtml + obsHtml + timelineHtml + '<p>' + escapeHtml(fullAnswer) + '</p>' + sourcesHtml;
     }
 }
 
@@ -318,6 +416,8 @@ async function sendChat(question) {
         let currentSources = [];
         let currentRoute = 'direct';
         let agentSteps = [];
+        let planningMeta = { task: '', questionSignature: '', responseMode: '' };
+        let obsMeta = [];  // 可观测性标签
         let msgDiv = null;
 
         while (true) {
@@ -347,8 +447,40 @@ async function sendChat(question) {
                             fullAnswer,
                             currentSources,
                             agentSteps,
+                            planningMeta,
+                            obsMeta,
                         });
                         setStatus('生成中', 'processing');
+
+                    } else if (payload.type === 'planning') {
+                        planningMeta = {
+                            task: payload.task || planningMeta.task,
+                            questionSignature: payload.question_signature || planningMeta.questionSignature,
+                            responseMode: payload.response_mode || planningMeta.responseMode,
+                        };
+                        // follow-up 短答模式标签
+                        if (payload.response_mode && ['followup_brief', 'match_brief'].includes(payload.response_mode)) {
+                            if (!obsMeta.find(t => t.type === 'followup_brief')) {
+                                obsMeta.push({ type: 'followup_brief', detail: payload.response_mode });
+                            }
+                        }
+                        if (payload.task) {
+                            currentRoute = payload.task;
+                        }
+                        if (!msgDiv) {
+                            removeTypingIndicator();
+                            msgDiv = appendMessage('ai', '', [], currentRoute, true);
+                        }
+                        const contentEl = msgDiv.querySelector('.message-content');
+                        contentEl.innerHTML = renderAiMessageContent({
+                            routeType: currentRoute,
+                            fullAnswer,
+                            currentSources,
+                            agentSteps,
+                            planningMeta,
+                            obsMeta,
+                        });
+                        setStatus('规划中', 'processing');
 
                     } else if (payload.type === 'agent_start') {
                         agentSteps = agentSteps.filter(step => !(step.agent === payload.agent && step.status === 'running'));
@@ -366,6 +498,8 @@ async function sendChat(question) {
                                 fullAnswer,
                                 currentSources,
                                 agentSteps,
+                                planningMeta,
+                                obsMeta,
                             });
                         }
 
@@ -380,15 +514,50 @@ async function sendChat(question) {
                                 fullAnswer,
                                 currentSources,
                                 agentSteps,
+                                planningMeta,
+                                obsMeta,
                             });
                         }
 
                     } else if (payload.type === 'agent_cache_hit') {
-                        setStatus('复用已有结果', 'processing');
+                        // 可观测性标签
+                        if (!obsMeta.find(t => t.type === 'cache_hit')) {
+                            const detail = payload.backend
+                                ? `${payload.backend}${payload.hit_count ? ' · hits:' + payload.hit_count : ''}`
+                                : '';
+                            obsMeta.push({ type: 'cache_hit', detail });
+                        }
+                        setStatus(getCacheHitStatusText(payload, planningMeta), 'processing');
+                        if (msgDiv) {
+                            const hint = buildCacheHintText(payload);
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                                planningMeta,
+                                obsMeta,
+                            });
+                        }
 
                     } else if (payload.type === 'status') {
                         if (payload.content) {
                             setStatus(payload.content, 'processing');
+                            // 从 status 文本推断可观测性标签
+                            const content = payload.content;
+                            if (content.includes('复用') && content.includes('JD') && !obsMeta.find(t => t.type === 'reuse_jd')) {
+                                obsMeta.push({ type: 'reuse_jd' });
+                            }
+                            if (content.includes('复用') && content.includes('简历') && !obsMeta.find(t => t.type === 'reuse_resume')) {
+                                obsMeta.push({ type: 'reuse_resume' });
+                            }
+                            if (content.includes('跳过') && content.includes('提取') && !obsMeta.find(t => t.type === 'dedup_extract')) {
+                                obsMeta.push({ type: 'dedup_extract' });
+                            }
+                            if (content.includes('降级') && !obsMeta.find(t => t.type === 'kb_low_relevance')) {
+                                obsMeta.push({ type: 'kb_low_relevance' });
+                            }
                         }
 
                     } else if (payload.type === 'sources') {
@@ -402,6 +571,8 @@ async function sendChat(question) {
                                 fullAnswer,
                                 currentSources,
                                 agentSteps,
+                                planningMeta,
+                                obsMeta,
                             });
                         }
 
@@ -415,6 +586,8 @@ async function sendChat(question) {
                                 fullAnswer,
                                 currentSources,
                                 agentSteps,
+                                planningMeta,
+                                obsMeta,
                             });
                             scrollToBottom();
                         }
@@ -429,6 +602,8 @@ async function sendChat(question) {
                                 fullAnswer,
                                 currentSources,
                                 agentSteps,
+                                planningMeta,
+                                obsMeta,
                             });
                         }
                         if (payload.session_id && payload.session_id !== sessionId) {

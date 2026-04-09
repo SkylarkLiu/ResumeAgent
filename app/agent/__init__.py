@@ -6,6 +6,11 @@ from app.agent.graph import (
     get_jd_analysis_subgraph,
     get_resume_analysis_subgraph,
 )
+from app.agent.agents.cache_store import (
+    get_cache_store_backend,
+    init_cache_store,
+    shutdown_cache_store,
+)
 from app.agent.checkpointer import (
     get_checkpointer,
     get_checkpointer_backend,
@@ -15,6 +20,9 @@ from app.agent.checkpointer import (
 
 __all__ = [
     "build_agent_graph",
+    "init_cache_store",
+    "shutdown_cache_store",
+    "get_cache_store_backend",
     "get_checkpointer",
     "get_checkpointer_backend",
     "init_checkpointer",

@@ -347,6 +347,90 @@ body {
     margin: 0 0 10px 0;
 }
 
+.planning-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0 0 8px 0;
+}
+
+.planning-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(67, 97, 238, 0.12);
+    color: #4361ee;
+}
+
+.planning-badge.subtle {
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.cache-hint {
+    margin: 0 0 8px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+/* 可观测性标签 */
+.obs-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 4px 0 8px 0;
+}
+.obs-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: #f0f4ff;
+    color: #4361ee;
+    border: 1px solid #d0d8f0;
+}
+.obs-tag.cache_hit {
+    background: #e8f5e9;
+    color: #2e7d32;
+    border-color: #c8e6c9;
+}
+.obs-tag.reuse_jd {
+    background: #fff3e0;
+    color: #e65100;
+    border-color: #ffe0b2;
+}
+.obs-tag.reuse_resume {
+    background: #fce4ec;
+    color: #c62828;
+    border-color: #f8bbd0;
+}
+.obs-tag.followup_brief {
+    background: #e8eaf6;
+    color: #283593;
+    border-color: #c5cae9;
+}
+.obs-tag.dedup_extract {
+    background: #f3e5f5;
+    color: #6a1b9a;
+    border-color: #e1bee7;
+}
+.obs-tag.kb_low_relevance {
+    background: #fff8e1;
+    color: #f57f17;
+    border-color: #ffe082;
+}
+.obs-detail {
+    font-size: 10px;
+    color: var(--text-secondary);
+    margin-left: 2px;
+}
+
 .agent-step {
     display: inline-flex;
     align-items: center;

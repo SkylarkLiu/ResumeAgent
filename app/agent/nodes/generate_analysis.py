@@ -34,6 +34,8 @@ _DEFAULT_ANALYSIS_QUESTIONS = {
 
 
 def _followup_generation_config(task_type: str, is_followup: bool) -> tuple[float, int]:
+    if task_type == "match_brief":
+        return 0.3, 900
     if task_type == "match_followup":
         return 0.3, 900
     if is_followup:
@@ -102,8 +104,9 @@ def _build_analysis_messages(state: AgentState) -> tuple[list[dict] | None, bool
 
     # 构造 prompt
     task_type = str(state.get("task_type", ""))
-    is_followup = task_type in {"resume_followup", "match_followup"} or _is_followup_resume_question(user_question, resume_data)
-    if task_type == "match_followup":
+    response_mode = str(state.get("response_mode", ""))
+    is_followup = response_mode in {"followup_brief", "match_brief"} or task_type in {"resume_followup", "match_followup"} or _is_followup_resume_question(user_question, resume_data)
+    if response_mode == "match_brief" or task_type == "match_followup":
         if jd_data and isinstance(jd_data, dict) and not jd_data.get("extract_error"):
             resume_json = json.dumps(_build_resume_compact_summary(resume_data), ensure_ascii=False, indent=2)
             jd_context = json.dumps(_build_jd_compact_summary(jd_data), ensure_ascii=False, indent=2)
@@ -182,8 +185,8 @@ def generate_analysis(state: AgentState) -> dict:
     )
 
     try:
-        task_type = str(state.get("task_type", ""))
-        temperature, max_tokens = _followup_generation_config(task_type, is_followup)
+        mode = str(state.get("response_mode") or state.get("task_type", ""))
+        temperature, max_tokens = _followup_generation_config(mode, is_followup)
         answer = chat_completion(
             llm_messages,
             temperature=temperature,
@@ -244,8 +247,8 @@ async def generate_analysis_stream(state: AgentState) -> AsyncGenerator[dict[str
 
     full_answer = ""
     try:
-        task_type = str(state.get("task_type", ""))
-        temperature, max_tokens = _followup_generation_config(task_type, is_followup)
+        mode = str(state.get("response_mode") or state.get("task_type", ""))
+        temperature, max_tokens = _followup_generation_config(mode, is_followup)
         async for delta in chat_completion_stream_async(
             llm_messages,
             temperature=temperature,

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -41,56 +41,29 @@ def _trim_jd_payload(jd_data: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _latest_user_question(messages: list[Any]) -> str:
-    for msg in reversed(messages or []):
-        content = getattr(msg, "content", "")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-    return ""
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
-def _normalize_question_signature(task_type: str, question: str) -> str:
-    q = (question or "").strip().lower()
-    if not q:
-        return "empty"
-
-    if task_type == "jd_followup":
-        if "面试" in q:
-            return "jd_followup:interview"
-        if any(k in q for k in ("技术栈", "技能", "能力")):
-            return "jd_followup:skills"
-        if any(k in q for k in ("优先", "重点", "最需要")):
-            return "jd_followup:priority"
-        return "jd_followup:generic"
-
-    if task_type == "resume_followup":
-        if any(k in q for k in ("优化", "润色", "改写", "重写")):
-            return "resume_followup:optimize"
-        if any(k in q for k in ("亮点", "优势", "突出")):
-            return "resume_followup:strengths"
-        if any(k in q for k in ("怎么写", "如何写")):
-            return "resume_followup:writing"
-        return "resume_followup:generic"
-
-    if task_type == "match_followup":
-        if any(k in q for k in ("缺", "差距", "缺口", "不足")):
-            return "match_followup:gap"
-        if any(k in q for k in ("优先", "最需要", "先补", "先学")):
-            return "match_followup:priority"
-        if any(k in q for k in ("匹配", "匹配度")):
-            return "match_followup:match"
-        return "match_followup:generic"
-
-    compact = re.sub(r"\s+", " ", q)
-    return compact[:200]
+def _build_cache_meta(state: dict[str, Any], expert_name: str, cache_key: str) -> dict[str, Any]:
+    return {
+        "expert": expert_name,
+        "task_type": str(state.get("task_type", "")),
+        "question_signature": str(state.get("question_signature", "")),
+        "response_mode": str(state.get("response_mode", "")),
+        "cache_key": cache_key,
+        "created_at": _utc_now_iso(),
+        "last_hit_at": "",
+        "hit_count": 0,
+    }
 
 
 def build_resume_expert_cache_key(state: dict[str, Any]) -> str:
     task_type = str(state.get("task_type", ""))
-    question = _latest_user_question(state.get("messages", []))
     payload = {
         "task_type": task_type,
-        "question_signature": _normalize_question_signature(task_type, question),
+        "question_signature": str(state.get("question_signature", "")),
+        "response_mode": str(state.get("response_mode", "")),
         "resume_data": _trim_resume_payload(state.get("resume_data")),
         "jd_data": _trim_jd_payload(state.get("jd_data")),
     }
@@ -99,17 +72,17 @@ def build_resume_expert_cache_key(state: dict[str, Any]) -> str:
 
 def build_jd_expert_cache_key(state: dict[str, Any]) -> str:
     task_type = str(state.get("task_type", ""))
-    question = _latest_user_question(state.get("messages", []))
     payload = {
         "task_type": task_type,
-        "question_signature": _normalize_question_signature(task_type, question),
+        "question_signature": str(state.get("question_signature", "")),
+        "response_mode": str(state.get("response_mode", "")),
         "jd_data": _trim_jd_payload(state.get("jd_data")),
         "resume_data": _trim_resume_payload(state.get("resume_data")),
     }
     return _stable_hash(payload)
 
 
-def build_resume_expert_cache_entry(state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+def build_resume_expert_cache_entry(state: dict[str, Any], result: dict[str, Any], *, cache_key: str) -> dict[str, Any]:
     return {
         "final_answer": result.get("final_answer", ""),
         "messages": result.get("messages", []),
@@ -117,24 +90,15 @@ def build_resume_expert_cache_entry(state: dict[str, Any], result: dict[str, Any
         "jd_data": state.get("jd_data"),
         "context_sources": result.get("context_sources", state.get("context_sources", [])),
         "working_context": result.get("working_context", state.get("working_context", "")),
+        "_meta": _build_cache_meta(state, "resume_expert", cache_key),
     }
 
 
-def build_jd_expert_cache_entry(state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+def build_jd_expert_cache_entry(state: dict[str, Any], result: dict[str, Any], *, cache_key: str) -> dict[str, Any]:
     return {
         "final_answer": result.get("final_answer", ""),
         "messages": result.get("messages", []),
         "jd_data": result.get("jd_data"),
         "resume_data": state.get("resume_data"),
+        "_meta": _build_cache_meta(state, "jd_expert", cache_key),
     }
-
-
-def upsert_cache_bucket(expert_cache: dict[str, dict] | None, expert_name: str, cache_key: str, entry: dict[str, Any], max_entries: int = 5) -> dict[str, dict]:
-    cache = dict(expert_cache or {})
-    bucket = dict(cache.get(expert_name, {}) or {})
-    bucket[cache_key] = entry
-    while len(bucket) > max_entries:
-        oldest_key = next(iter(bucket))
-        bucket.pop(oldest_key, None)
-    cache[expert_name] = bucket
-    return cache
