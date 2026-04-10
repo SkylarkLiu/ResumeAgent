@@ -85,7 +85,6 @@ def build_jd_expert_cache_key(state: dict[str, Any]) -> str:
 def build_resume_expert_cache_entry(state: dict[str, Any], result: dict[str, Any], *, cache_key: str) -> dict[str, Any]:
     return {
         "final_answer": result.get("final_answer", ""),
-        "messages": result.get("messages", []),
         "resume_data": result.get("resume_data"),
         "jd_data": state.get("jd_data"),
         "context_sources": result.get("context_sources", state.get("context_sources", [])),
@@ -97,7 +96,6 @@ def build_resume_expert_cache_entry(state: dict[str, Any], result: dict[str, Any
 def build_jd_expert_cache_entry(state: dict[str, Any], result: dict[str, Any], *, cache_key: str) -> dict[str, Any]:
     return {
         "final_answer": result.get("final_answer", ""),
-        "messages": result.get("messages", []),
         "jd_data": result.get("jd_data"),
         "resume_data": state.get("resume_data"),
         "_meta": _build_cache_meta(state, "jd_expert", cache_key),

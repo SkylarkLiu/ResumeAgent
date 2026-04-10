@@ -34,6 +34,9 @@ from app.schemas.agent import (
     ResumeAnalysisRequest,
     ResumeAnalysisResponse,
     SessionInfo,
+    SessionListItem,
+    SessionMessageItem,
+    SessionMessagesResponse,
 )
 
 logger = setup_logger("api.agent")
@@ -96,6 +99,90 @@ def _sse_event(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _message_content_to_text(content: Any) -> str:
+    """将 LangChain message content 统一转为可展示文本。"""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        text_parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        return "\n".join(p for p in text_parts if p).strip()
+    if content is None:
+        return ""
+    return str(content).strip()
+
+
+def _truncate_preview(text: str, limit: int = 80) -> str:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "…"
+
+
+def _build_session_title(messages: list[Any]) -> str:
+    """优先用首条用户消息生成 GPT 风格标题。"""
+    for msg in messages:
+        msg_type = getattr(msg, "type", type(msg).__name__)
+        if msg_type != "human":
+            continue
+        text = _truncate_preview(_message_content_to_text(getattr(msg, "content", "")), 28)
+        if text:
+            return text
+    return "新建对话"
+
+
+def _normalize_session_messages(
+    messages: list[Any],
+    task_type: str = "",
+    route_type: str = "",
+) -> list[SessionMessageItem]:
+    """将 checkpoint 中的原始消息归一化为稳定可展示的 user/assistant turn。"""
+    normalized: list[SessionMessageItem] = []
+
+    for msg in messages:
+        msg_type = getattr(msg, "type", type(msg).__name__)
+        if msg_type == "human":
+            role = "user"
+        elif msg_type in ("ai", "AIMessage"):
+            role = "assistant"
+        else:
+            continue
+
+        text = _message_content_to_text(getattr(msg, "content", ""))
+        if not text:
+            continue
+
+        # 合并连续 assistant 消息，避免子图/最终汇总造成的历史显示错位和重复。
+        if normalized and normalized[-1].role == role == "assistant":
+            prev = normalized[-1].content.strip()
+            current = text.strip()
+            if current == prev:
+                continue
+            if current in prev:
+                continue
+            if prev in current:
+                normalized[-1].content = current
+            else:
+                normalized[-1].content = f"{prev}\n\n{current}"
+            normalized[-1].task_type = task_type
+            normalized[-1].route_type = route_type
+            continue
+
+        normalized.append(
+            SessionMessageItem(
+                role=role,
+                content=text,
+                task_type=task_type if role == "assistant" else "",
+                route_type=route_type if role == "assistant" else "",
+            )
+        )
+
+    return normalized
+
+
 def _build_chat_turn_input_state(question: str, session_id: str, session_values: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     为每一轮新的 chat 请求构造初始状态。
@@ -118,6 +205,10 @@ def _build_chat_turn_input_state(question: str, session_id: str, session_values:
         "max_steps": 3,
         "active_agent": None,
         "final_response_ready": False,
+        "tool_cache": session_values.get("tool_cache", {}),
+        "tool_trace": [],
+        "react_iterations": 0,
+        "react_handoff_agent": None,
     }
 
 
@@ -265,7 +356,12 @@ async def _resume_stream_event_generator(
         )
 
         yield _sse_event({"type": "done", "session_id": session_id, "answer": final_answer, "resume_data": resume_summary})
-        logger.info("简历分析流式完成: session=%s, answer=%d字符", session_id, len(final_answer))
+        logger.info(
+            "简历分析完成 | session=%s | answer=%d字符 | preview=%s",
+            session_id[:16],
+            len(final_answer),
+            final_answer[:80].replace('\n', ' ') if final_answer else "(空)",
+        )
 
     except Exception as e:
         logger.error("简历分析流式异常: %s", e, exc_info=True)
@@ -366,17 +462,25 @@ async def agent_chat_stream(request: AgentChatRequest):
 
     async def event_generator():
         try:
-            logger.info("Agent 流式请求: thread=%s, question=%s", session_id, question[:50])
-
-            session_values = await _load_session_values(session_id)
-            input_state = _build_chat_turn_input_state(question, session_id, session_values)
-
             route_str = "direct"
             task_str = "qa"
             question_signature = ""
             response_mode = ""
             final_answer = ""
             sources_sent = False
+
+            logger.info(
+                "收到流式对话请求 | thread=%s | route=%s | task=%s | signature=%s | mode=%s | question=%s",
+                session_id[:16],
+                route_str,
+                task_str,
+                question_signature,
+                response_mode,
+                question[:100],
+            )
+
+            session_values = await _load_session_values(session_id)
+            input_state = _build_chat_turn_input_state(question, session_id, session_values)
 
             async for mode, payload in _agent_graph.astream(
                 input_state,
@@ -391,6 +495,12 @@ async def agent_chat_stream(request: AgentChatRequest):
                         yield _sse_event({"type": "agent_start", "agent": payload.get("agent", "")})
                     elif event_type == "agent_result":
                         yield _sse_event({"type": "agent_result", "agent": payload.get("agent", "")})
+                    elif event_type == "tool_start":
+                        yield _sse_event({"type": "tool_start", "tool": payload.get("tool", "")})
+                    elif event_type == "tool_result":
+                        yield _sse_event({"type": "tool_result", "tool": payload.get("tool", "")})
+                    elif event_type == "tool_cache_hit":
+                        yield _sse_event({"type": "tool_cache_hit", "tool": payload.get("tool", "")})
                     elif event_type == "agent_cache_hit":
                         yield _sse_event({
                             "type": "agent_cache_hit",
@@ -452,6 +562,8 @@ async def agent_chat_stream(request: AgentChatRequest):
                         final_answer = payload["resume_expert"].get("final_answer", final_answer)
                     if "jd_expert" in payload:
                         final_answer = payload["jd_expert"].get("final_answer", final_answer)
+                    if "react_fallback" in payload:
+                        final_answer = payload["react_fallback"].get("final_answer", final_answer)
                     if "generate_final" in payload:
                         final_answer = payload["generate_final"].get("final_answer", final_answer)
 
@@ -461,12 +573,14 @@ async def agent_chat_stream(request: AgentChatRequest):
             yield _sse_event({"type": "done", "session_id": session_id, "answer": final_answer})
 
             logger.info(
-                "Agent 流式回复完成: thread=%s, route=%s, signature=%s, mode=%s, answer=%d字符",
-                session_id,
+                "对话完成 | thread=%s | route=%s | task=%s | signature=%s | mode=%s | answer=%d字符 | preview=%s",
+                session_id[:16],
                 route_str,
+                task_str,
                 question_signature,
                 response_mode,
                 len(final_answer),
+                final_answer[:80].replace('\n', ' ') if final_answer else "(空)",
             )
 
         except Exception as e:
@@ -511,6 +625,14 @@ async def resume_analysis_text(request: ResumeAnalysisRequest):
         return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     session_id = _ensure_session(request.session_id)
+
+    logger.info(
+        "简历分析请求 | session=%s | question=%s | target=%s | text_len=%d",
+        session_id[:16],
+        request.question[:50],
+        request.target_position[:30],
+        len(request.resume_text),
+    )
 
     resume_data = {
         "raw_text": request.resume_text.strip(),
@@ -565,6 +687,14 @@ async def resume_analysis_upload(
         return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     session_id = _ensure_session(session_id)
+
+    logger.info(
+        "简历上传分析 | session=%s | file=%s | size=%dKB | question=%s",
+        session_id[:16],
+        filename,
+        len(content) // 1024,
+        question[:50],
+    )
 
     # 根据文件类型构建 resume_data
     if ext in (".txt", ".md"):
@@ -688,7 +818,12 @@ async def _jd_stream_event_generator(
         )
 
         yield _sse_event({"type": "done", "session_id": session_id, "answer": final_answer, "jd_data": jd_summary})
-        logger.info("JD 分析流式完成: session=%s, answer=%d字符", session_id, len(final_answer))
+        logger.info(
+            "JD分析完成 | session=%s | answer=%d字符 | preview=%s",
+            session_id[:16],
+            len(final_answer),
+            final_answer[:80].replace('\n', ' ') if final_answer else "(空)",
+        )
 
     except Exception as e:
         logger.error("JD 分析流式异常: %s", e, exc_info=True)
@@ -722,6 +857,13 @@ async def jd_analysis_text(request: JDAnalysisRequest):
         return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     session_id = _ensure_session(request.session_id)
+
+    logger.info(
+        "JD分析请求 | session=%s | question=%s | text_len=%d",
+        session_id[:16],
+        request.question[:50],
+        len(request.jd_text),
+    )
 
     jd_data = {
         "raw_text": request.jd_text.strip(),
@@ -773,6 +915,14 @@ async def jd_analysis_upload(
         return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     session_id = _ensure_session(session_id)
+
+    logger.info(
+        "JD上传分析 | session=%s | file=%s | size=%dKB | question=%s",
+        session_id[:16],
+        filename,
+        len(content) // 1024,
+        question[:50],
+    )
 
     # 根据文件类型构建 jd_data
     if ext in (".txt", ".md"):
@@ -828,6 +978,204 @@ async def jd_analysis_upload(
 
 
 # ---- 会话管理接口 ----
+
+@router.get("/sessions", response_model=list[SessionListItem])
+async def list_sessions(limit: int = 50, offset: int = 0):
+    """
+    列出所有历史会话。
+
+    支持 MemorySaver 和 PostgreSQL 两种 checkpointer 后端。
+    """
+    if _agent_graph is None:
+        logger.info("[list_sessions] agent_graph 未初始化，返回空列表")
+        return []
+
+    try:
+        # ── 路径 1: MemorySaver 后端：直接遍历内存字典 ──
+        if _checkpointer is not None and hasattr(_checkpointer, "storage") and isinstance(_checkpointer.storage, dict):
+            items: list[SessionListItem] = []
+            for thread_id, state_data in _checkpointer.storage.items():
+                values = state_data.get("values", {}) if isinstance(state_data, dict) else {}
+                messages = values.get("messages", []) if isinstance(values, dict) else []
+                normalized_messages = _normalize_session_messages(
+                    messages,
+                    task_type=str(values.get("task_type", "")),
+                    route_type=str(values.get("route_type", "")),
+                )
+                title = _build_session_title(messages)
+                last_preview = _truncate_preview(
+                    normalized_messages[-1].content if normalized_messages else "",
+                    80,
+                )
+                updated_at = str(state_data.get("created_at", "")) if isinstance(state_data, dict) else ""
+
+                items.append(SessionListItem(
+                    session_id=thread_id,
+                    title=title,
+                    message_count=len(normalized_messages),
+                    last_message_preview=last_preview,
+                    has_resume_data=bool(values.get("resume_data")),
+                    has_jd_data=bool(values.get("jd_data")),
+                    task_type=str(values.get("task_type", "")),
+                    updated_at=updated_at,
+                ))
+            items.sort(key=lambda x: (x.updated_at or "", x.message_count), reverse=True)
+            logger.info("[list_sessions] MemorySaver 模式: 返回 %d 个会话", len(items))
+            return items[offset:offset + limit]
+
+        # ── 路径 2: PostgreSQL 后端（AsyncPostgresSaver）──
+        if _checkpointer is not None:
+            cp_type_name = type(_checkpointer).__name__
+            logger.info(
+                "[list_sessions] PG 模式, checkpointer 类型=%s",
+                cp_type_name,
+            )
+
+            result: list[SessionListItem] = []
+
+            # 直接用 psycopg 查询 checkpoints 表获取 thread_id 列表
+            # 注意：AsyncPostgresSaver 没有 alist_threads 方法；
+            # checkpoints 表没有 created_at 列，用 MAX(checkpoint_id) 替代排序
+            from app.core.config import get_settings as _get_settings
+            _settings = _get_settings()
+            db_url = (getattr(_settings, "checkpoint_db_url", "") or "").strip()
+            if db_url:
+                try:
+                    from psycopg import AsyncConnection
+                    from psycopg.rows import dict_row
+
+                    async with await AsyncConnection.connect(
+                        db_url, autocommit=True, row_factory=dict_row
+                    ) as conn:
+                        # 先检查哪些表存在
+                        tables_cur = await conn.execute("""
+                            SELECT table_name FROM information_schema.tables
+                            WHERE table_schema = 'public'
+                              AND table_name IN ('checkpoints', 'checkpoint_blobs')
+                        """)
+                        tables_rows = await tables_cur.fetchall()
+                        existing_tables = [row["table_name"] for row in tables_rows]
+                        logger.info("[list_sessions] PG 现有表: %s", existing_tables)
+
+                        # 从 checkpoints 表获取去重的 thread_id 列表
+                        # checkpoint_id 是 UUID v7 格式（时间有序），可用来排序
+                        if "checkpoints" in existing_tables:
+                            rows_cur = await conn.execute("""
+                                SELECT thread_id,
+                                       COUNT(*) as checkpoint_count,
+                                       MAX(checkpoint_id) as last_checkpoint_id
+                                FROM checkpoints
+                                GROUP BY thread_id
+                                ORDER BY last_checkpoint_id DESC
+                                LIMIT %s OFFSET %s
+                            """, (limit, offset))
+                        elif "checkpoint_blobs" in existing_tables:
+                            rows_cur = await conn.execute("""
+                                SELECT thread_id,
+                                       COUNT(*) as checkpoint_count
+                                FROM checkpoint_blobs
+                                GROUP BY thread_id
+                                LIMIT %s OFFSET %s
+                            """, (limit, offset))
+                        else:
+                            logger.warning("[list_sessions] PG 中未找到 checkpoints 相关表")
+                            return []
+
+                        thread_rows = await rows_cur.fetchall()
+                        thread_ids = [row["thread_id"] for row in thread_rows]
+                        logger.info("[list_sessions] 查到 %d 个 thread_id: %s",
+                                    len(thread_ids),
+                                    [tid[:16] + "…" for tid in thread_ids])
+
+                        # 逐个通过 aget_state 获取会话详情
+                        for thread_id in thread_ids:
+                            try:
+                                config = {"configurable": {"thread_id": thread_id}}
+                                state_snapshot = await _agent_graph.aget_state(config)
+                                if state_snapshot:
+                                    values = getattr(state_snapshot, "values", {}) or {}
+                                    messages = values.get("messages", [])
+                                    normalized_messages = _normalize_session_messages(
+                                        messages,
+                                        task_type=str(values.get("task_type", "")),
+                                        route_type=str(values.get("route_type", "")),
+                                    )
+                                    last_preview = _truncate_preview(
+                                        normalized_messages[-1].content if normalized_messages else "",
+                                        80,
+                                    )
+                                    title = _build_session_title(messages)
+                                    updated_at = str(getattr(state_snapshot, "created_at", "") or "")
+
+                                    result.append(SessionListItem(
+                                        session_id=thread_id,
+                                        title=title,
+                                        message_count=len(normalized_messages),
+                                        last_message_preview=last_preview,
+                                        has_resume_data=bool(values.get("resume_data")),
+                                        has_jd_data=bool(values.get("jd_data")),
+                                        task_type=str(values.get("task_type", "")),
+                                        updated_at=updated_at,
+                                    ))
+                                else:
+                                    result.append(SessionListItem(
+                                        session_id=thread_id,
+                                        message_count=0,
+                                    ))
+                            except Exception as inner_err:
+                                logger.debug(
+                                    "[list_sessions] 读取 session=%s 失败: %s",
+                                    thread_id[:16], inner_err,
+                                )
+                                result.append(SessionListItem(
+                                    session_id=thread_id,
+                                    message_count=0,
+                                ))
+
+                    logger.info("[list_sessions] PG 查询成功: 返回 %d 个会话", len(result))
+                    return result
+
+                except Exception as e:
+                    logger.error(
+                        "[list_sessions] PG 查询失败: %s", e, exc_info=True,
+                    )
+
+        logger.info("[list_sessions] 无可用 checkpointer，返回空列表")
+        return []
+
+    except Exception as e:
+        logger.error("[list_sessions] 未预期的错误: %s", e, exc_info=True)
+        return []
+
+
+@router.get("/sessions/{session_id}/messages", response_model=SessionMessagesResponse)
+async def get_session_messages(session_id: str):
+    """
+    获取指定会话的消息历史。
+
+    返回该会话中的所有用户和 AI 消息，用于前端恢复历史对话。
+    """
+    if _agent_graph is None:
+        return SessionMessagesResponse(session_id=session_id, messages=[])
+
+    try:
+        config = {"configurable": {"thread_id": session_id}}
+        state_snapshot = await _agent_graph.aget_state(config)
+        if not state_snapshot:
+            return SessionMessagesResponse(session_id=session_id, messages=[])
+
+        values = getattr(state_snapshot, "values", {}) or {}
+        messages = values.get("messages", [])
+        task_type = str(values.get("task_type", ""))
+        route_type = str(values.get("route_type", ""))
+        result_messages = _normalize_session_messages(messages, task_type=task_type, route_type=route_type)
+
+        return SessionMessagesResponse(session_id=session_id, messages=result_messages)
+
+    except Exception as e:
+        logger.error("获取会话消息失败: session=%s, error=%s", session_id, e, exc_info=True)
+        return SessionMessagesResponse(session_id=session_id, messages=[])
+
 
 @router.get("/session/{session_id}", response_model=SessionInfo)
 async def get_session(session_id: str):

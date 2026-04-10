@@ -10,9 +10,16 @@
     <div id="app">
         <!-- 侧边栏 -->
         <aside id="sidebar">
-            <h2>📎 知识库</h2>
-            <div id="file-list">
-                <p class="empty-hint">暂无文件，请上传知识文档</p>
+            <div class="sidebar-header">
+                <h2>💬 会话历史</h2>
+                <button id="btn-refresh-sessions" class="btn-sidebar-action" title="刷新会话列表">🔄</button>
+            </div>
+            <div id="session-list">
+                <p class="empty-hint">暂无历史会话</p>
+            </div>
+            <div class="sidebar-footer">
+                <button id="btn-upload-kb" class="btn-sidebar-footer" title="上传文件到知识库">📎 上传知识库</button>
+                <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.txt,.md" hidden multiple>
             </div>
         </aside>
 

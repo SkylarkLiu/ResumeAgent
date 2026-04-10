@@ -27,6 +27,7 @@ class TaskType(str, Enum):
     JD_FOLLOWUP = "jd_followup"
     RESUME_FOLLOWUP = "resume_followup"
     MATCH_FOLLOWUP = "match_followup"
+    REACT_FALLBACK = "react_fallback"
 
 
 class RouteDecision(BaseModel):
@@ -57,7 +58,7 @@ class AgentState(TypedDict, total=False):
 
     # ---- 路由决策（存储字符串值，避免 msgpack 序列化问题）----
     route_type: str  # "retrieve" | "web" | "direct"
-    task_type: str   # "qa" | "resume_analysis" | "jd_analysis" | "jd_followup" | "resume_followup" | "match_followup"
+    task_type: str   # "qa" | "resume_analysis" | "jd_analysis" | "jd_followup" | "resume_followup" | "match_followup" | "react_fallback"
     question_signature: str
     planning_reason: str
     response_mode: str  # "full_report" | "followup_brief" | "match_brief" | "direct_answer"
@@ -68,6 +69,10 @@ class AgentState(TypedDict, total=False):
     final_response_ready: bool
     agent_outputs: dict[str, dict]
     expert_cache: dict[str, dict]
+    tool_cache: dict[str, dict]
+    tool_trace: list[dict]
+    react_iterations: int
+    react_handoff_agent: str | None
 
     # ---- 会话与跨轮次数据 ----
     session_id: str

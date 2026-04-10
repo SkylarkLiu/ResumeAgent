@@ -28,7 +28,7 @@ def _emit_custom_event(payload: dict[str, Any]) -> None:
 
 
 def _normalize_agent_name(name: str | None) -> str | None:
-    if name in {"qa_flow", "jd_expert", "resume_expert", "respond"}:
+    if name in {"qa_flow", "jd_expert", "resume_expert", "react_fallback", "respond"}:
         return name
     return None
 
@@ -37,6 +37,7 @@ AGENT_STATUS_TEXT: dict[str, str] = {
     "qa_flow": "正在检索知识库",
     "jd_expert": "正在分析岗位描述",
     "resume_expert": "正在评估简历",
+    "react_fallback": "正在组合工具处理非标准请求",
 }
 
 _MAX_ROUTER_RETRIES = 1
@@ -159,6 +160,20 @@ def _rule_based_followup_route(question: str, state: AgentState, web_search_avai
     return None
 
 
+def _should_use_react_fallback(question: str, state: AgentState) -> bool:
+    q = question.lower()
+    combined_keywords = ("结合", "顺便", "同时", "综合", "再根据", "然后", "先", "一并", "一起")
+    has_jd_data = bool(state.get("jd_data"))
+    has_resume_data = bool(state.get("resume_data"))
+    if any(keyword in q for keyword in combined_keywords):
+        return True
+    if "知识库" in question and (has_jd_data or has_resume_data):
+        return True
+    if "联网" in question and ("分析" in question or "总结" in question):
+        return True
+    return False
+
+
 def _parse_json_from_response(text: str) -> dict | None:
     text = text.strip()
     if not text:
@@ -205,6 +220,16 @@ def _classify_task(state: AgentState, *, web_search_available: bool) -> dict[str
             question[:80],
         )
         return rule_result
+
+    if _should_use_react_fallback(question, state):
+        logger.info("Supervisor 触发 react_fallback: question=%s", question[:80])
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.REACT_FALLBACK.value,
+            "planning_reason": "问题包含明显的组合式或非标准请求，进入受控 ReAct fallback",
+            "question_signature": "react_fallback:generic",
+            "response_mode": "react_fallback",
+        }
 
     router_messages = [
         {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
@@ -256,13 +281,13 @@ def _classify_task(state: AgentState, *, web_search_available: bool) -> dict[str
             if attempt < _MAX_ROUTER_RETRIES:
                 logger.warning("Supervisor 分类失败 (attempt=%d/%d), 重试中: %s", attempt + 1, 1 + _MAX_ROUTER_RETRIES, e)
 
-    logger.warning("Supervisor 分类最终 fallback 到 DIRECT+QA: %s", last_error)
+    logger.warning("Supervisor 分类最终 fallback 到 react_fallback: %s", last_error)
     return {
         "route_type": RouteType.DIRECT.value,
-        "task_type": TaskType.QA.value,
-        "planning_reason": f"分类失败后回退到直接回答: {last_error}",
-        "question_signature": "qa:fallback",
-        "response_mode": "direct_answer",
+        "task_type": TaskType.REACT_FALLBACK.value,
+        "planning_reason": f"分类失败后回退到受控 ReAct fallback: {last_error}",
+        "question_signature": "react_fallback:fallback",
+        "response_mode": "react_fallback",
     }
 
 
@@ -323,6 +348,8 @@ def supervisor_plan_node(state: AgentState, *, web_search_available: bool = Fals
         execution_plan = ["jd_expert", "respond"]
     elif task_type in {"resume_analysis", "resume_followup", "match_followup"}:
         execution_plan = ["resume_expert", "respond"]
+    elif task_type == "react_fallback":
+        execution_plan = ["react_fallback", "respond"]
     else:
         execution_plan = ["qa_flow", "respond"]
 
@@ -370,6 +397,8 @@ def supervisor_plan_node(state: AgentState, *, web_search_available: bool = Fals
         "active_agent": active_agent,
         "final_response_ready": active_agent == "respond",
         "agent_outputs": state.get("agent_outputs", {}),
+        "tool_trace": state.get("tool_trace", []),
+        "react_iterations": int(state.get("react_iterations", 0) or 0),
         "resume_data": resume_data if resume_data else ({"raw_text": question} if task_type in {"resume_analysis", "resume_followup", "match_followup"} and question else None),
         "jd_data": jd_data if jd_data else ({"raw_text": question} if task_type in {"jd_analysis", "jd_followup"} and question else None),
     }
@@ -388,8 +417,9 @@ def supervisor_review_node(state: AgentState) -> dict:
     next_step = current_step + 1
     final_answer = state.get("final_answer", "")
     agent_outputs = dict(state.get("agent_outputs", {}) or {})
+    handoff_agent = _normalize_agent_name(state.get("react_handoff_agent"))
 
-    if active_agent in {"qa_flow", "jd_expert", "resume_expert"}:
+    if active_agent in {"qa_flow", "jd_expert", "resume_expert", "react_fallback"}:
         summary_payload: dict[str, Any] = {
             "summary": final_answer[:500],
             "final_answer": final_answer,
@@ -401,9 +431,24 @@ def supervisor_review_node(state: AgentState) -> dict:
         elif active_agent == "resume_expert":
             summary_payload["resume_data"] = state.get("resume_data")
             summary_payload["jd_data"] = state.get("jd_data")
+        elif active_agent == "react_fallback":
+            summary_payload["context_sources"] = state.get("context_sources", [])
+            summary_payload["tool_trace"] = state.get("tool_trace", [])
+            summary_payload["jd_data"] = state.get("jd_data")
+            summary_payload["resume_data"] = state.get("resume_data")
 
         agent_outputs[active_agent] = summary_payload
         _emit_custom_event({"type": "agent_result", "agent": active_agent})
+
+    if active_agent == "react_fallback" and handoff_agent in {"qa_flow", "jd_expert", "resume_expert"}:
+        return {
+            "agent_outputs": agent_outputs,
+            "execution_plan": [handoff_agent, "respond"],
+            "current_step": 0,
+            "active_agent": None,
+            "final_response_ready": False,
+            "react_handoff_agent": None,
+        }
 
     final_response_ready = next_step >= len(execution_plan) or next_step >= max_steps
     next_agent = "respond" if final_response_ready else _normalize_agent_name(execution_plan[next_step]) or "respond"
@@ -430,7 +475,7 @@ def generate_final_node(state: AgentState) -> dict:
     """
     final_answer = state.get("final_answer", "")
     agent_outputs = state.get("agent_outputs", {}) or {}
-    execution_plan = [name for name in state.get("execution_plan", []) if name in {"qa_flow", "jd_expert", "resume_expert"}]
+    execution_plan = [name for name in state.get("execution_plan", []) if name in {"qa_flow", "jd_expert", "resume_expert", "react_fallback"}]
 
     if len(execution_plan) <= 1:
         if final_answer:
@@ -461,6 +506,7 @@ def generate_final_node(state: AgentState) -> dict:
             "qa_flow": "QA 专家",
             "jd_expert": "JD 专家",
             "resume_expert": "简历专家",
+            "react_fallback": "ReAct 兜底",
         }.get(agent_name, agent_name)
         expert_blocks.append(f"## {label}\n{answer}")
 
