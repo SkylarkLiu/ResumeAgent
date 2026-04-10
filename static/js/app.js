@@ -22,6 +22,7 @@ function resetSession() {
     localStorage.setItem('agent_session_id', sessionId);
     chatMessages.innerHTML = '';
     showWelcome();
+    loadSessionList();
 }
 
 function showWelcome() {
@@ -47,14 +48,15 @@ function showWelcome() {
 const chatMessages = document.getElementById('chat-messages');
 const messageInput = document.getElementById('message-input');
 const btnSend = document.getElementById('btn-send');
-const btnUpload = document.getElementById('btn-upload');
+const btnUpload = document.getElementById('btn-upload-kb');
 const fileInput = document.getElementById('file-input');
 const btnImage = document.getElementById('btn-image');
 const imageInput = document.getElementById('image-input');
 const imagePreview = document.getElementById('image-preview');
 const previewImg = document.getElementById('preview-img');
 const clearImageBtn = document.getElementById('clear-image');
-const fileList = document.getElementById('file-list');
+const sessionList = document.getElementById('session-list');
+const btnRefreshSessions = document.getElementById('btn-refresh-sessions');
 const statusIndicator = document.getElementById('status-indicator');
 const uploadModal = document.getElementById('upload-modal');
 const progressFill = document.getElementById('progress-fill');
@@ -114,6 +116,47 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function parseIsoDate(value) {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatSessionBucket(updatedAt) {
+    const date = parseIsoDate(updatedAt);
+    if (!date) return '更早';
+
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfYesterday = new Date(startOfToday);
+    startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+    const startOfLast7Days = new Date(startOfToday);
+    startOfLast7Days.setDate(startOfLast7Days.getDate() - 7);
+
+    if (date >= startOfToday) return '今天';
+    if (date >= startOfYesterday) return '昨天';
+    if (date >= startOfLast7Days) return '最近 7 天';
+    return '更早';
+}
+
+function formatSessionTime(updatedAt) {
+    const date = parseIsoDate(updatedAt);
+    if (!date) return '';
+    return new Intl.DateTimeFormat('zh-CN', {
+        month: 'numeric',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    }).format(date);
+}
+
+function getSessionTitle(session) {
+    const title = (session.title || '').trim();
+    if (title) return title;
+    const preview = (session.last_message_preview || '').trim();
+    return preview || '新建会话';
 }
 
 // --- 简单 Markdown 渲染 ---
@@ -246,7 +289,8 @@ function buildAgentTimelineHtml(agentSteps) {
     const labels = {
         qa_flow: 'QA 专家',
         jd_expert: 'JD 专家',
-        resume_expert: '简历专家'
+        resume_expert: '简历专家',
+        react_fallback: 'ReAct 兜底'
     };
 
     const items = agentSteps.map((step) => {
@@ -269,7 +313,8 @@ function buildPlanningMetaHtml(planningMeta) {
         jd_analysis: '岗位分析',
         jd_followup: 'JD 追问',
         resume_followup: '简历追问',
-        match_followup: '匹配追问'
+        match_followup: '匹配追问',
+        react_fallback: 'ReAct 兜底'
     };
 
     let html = '<div class="planning-meta">';
@@ -332,6 +377,8 @@ function buildObsTagsHtml(obsMeta) {
         followup_brief: '⚡',
         dedup_extract: '⏭️',
         kb_low_relevance: '🔄',
+        tool_running: '🛠️',
+        tool_used: '✅',
     };
     const labels = {
         cache_hit: '命中缓存',
@@ -340,6 +387,8 @@ function buildObsTagsHtml(obsMeta) {
         followup_brief: 'Follow-up 短答',
         dedup_extract: '跳过重复提取',
         kb_low_relevance: 'KB 降级搜索',
+        tool_running: '工具运行中',
+        tool_used: '已调用工具',
     };
     const items = obsMeta.map(tag => {
         const icon = icons[tag.type] || 'ℹ️';
@@ -360,7 +409,8 @@ function renderAiMessageContent({ routeType, fullAnswer, currentSources, agentSt
         jd_analysis: '🎯 岗位分析',
         jd_followup: '🎯 JD 追问',
         resume_followup: '📋 简历追问',
-        match_followup: '🧩 匹配追问'
+        match_followup: '🧩 匹配追问',
+        react_fallback: '🛠️ ReAct 兜底'
     };
 
     const routeHtml = routeType ? `<span class="route-tag ${routeType}">${routeLabels[routeType] || routeType}</span><br>` : '';
@@ -488,7 +538,8 @@ async function sendChat(question) {
                         const statusLabels = {
                             qa_flow: '正在检索知识库',
                             jd_expert: '正在分析岗位描述',
-                            resume_expert: '正在评估简历'
+                            resume_expert: '正在评估简历',
+                            react_fallback: '正在组合工具处理非标准请求'
                         };
                         setStatus(statusLabels[payload.agent] || '处理中', 'processing');
                         if (msgDiv) {
@@ -507,6 +558,57 @@ async function sendChat(question) {
                         agentSteps = agentSteps.map(step =>
                             step.agent === payload.agent ? { ...step, status: 'done' } : step
                         );
+                        if (msgDiv) {
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                                planningMeta,
+                                obsMeta,
+                            });
+                        }
+
+                    } else if (payload.type === 'tool_start') {
+                        setStatus(`正在调用工具：${payload.tool || 'unknown'}`, 'processing');
+                        obsMeta = obsMeta.filter(t => !(t.type === 'tool_running' && t.detail === payload.tool));
+                        obsMeta.push({ type: 'tool_running', detail: payload.tool || 'unknown' });
+                        if (msgDiv) {
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                                planningMeta,
+                                obsMeta,
+                            });
+                        }
+
+                    } else if (payload.type === 'tool_result') {
+                        setStatus(`已完成工具：${payload.tool || 'unknown'}`, 'processing');
+                        obsMeta = obsMeta.filter(t => !(t.type === 'tool_running' && t.detail === payload.tool));
+                        if (!obsMeta.find(t => t.type === 'tool_used' && t.detail === payload.tool)) {
+                            obsMeta.push({ type: 'tool_used', detail: payload.tool || 'unknown' });
+                        }
+                        if (msgDiv) {
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                                planningMeta,
+                                obsMeta,
+                            });
+                        }
+
+                    } else if (payload.type === 'tool_cache_hit') {
+                        setStatus(`命中工具缓存：${payload.tool || 'unknown'}`, 'processing');
+                        if (!obsMeta.find(t => t.type === 'cache_hit' && t.detail === `tool:${payload.tool || 'unknown'}`)) {
+                            obsMeta.push({ type: 'cache_hit', detail: `tool:${payload.tool || 'unknown'}` });
+                        }
                         if (msgDiv) {
                             const contentEl = msgDiv.querySelector('.message-content');
                             contentEl.innerHTML = renderAiMessageContent({
@@ -611,6 +713,8 @@ async function sendChat(question) {
                             localStorage.setItem('agent_session_id', sessionId);
                         }
                         setStatus('就绪', 'ready');
+                        // 对话完成后刷新会话列表
+                        loadSessionList();
 
                     } else if (payload.type === 'error') {
                         removeTypingIndicator();
@@ -813,6 +917,8 @@ async function analyzeResume(file, text) {
                             }
                         }
                         setStatus('就绪', 'ready');
+                        // 分析完成后刷新会话列表
+                        loadSessionList();
 
                     } else if (payload.type === 'error') {
                         removeTypingIndicator();
@@ -873,12 +979,9 @@ async function uploadFiles(files) {
 
             if (res.ok) {
                 successCount++;
-                addFileToList(file.name, true);
-            } else {
-                addFileToList(file.name, false, data.detail);
             }
         } catch (err) {
-            addFileToList(file.name, false, err.message);
+            // 静默处理
         }
     }
 
@@ -890,30 +993,136 @@ async function uploadFiles(files) {
     console.log(`[Upload] 全部完成: ${successCount}/${total}`);
 }
 
-function addFileToList(name, success, error = null) {
-    const hint = fileList.querySelector('.empty-hint');
-    if (hint) hint.remove();
+// --- 会话列表 ---
+async function loadSessionList() {
+    try {
+        const res = await fetch(`${API_BASE}/agent/sessions?limit=50`);
+        if (!res.ok) return;
+        const data = await res.json();
 
-    const div = document.createElement('div');
-    div.className = 'file-item';
+        sessionList.innerHTML = '';
 
-    const ext = name.split('.').pop().toLowerCase();
-    let icon = '📄';
-    if (['pdf'].includes(ext)) icon = '📕';
-    if (['png', 'jpg', 'jpeg'].includes(ext)) icon = '🖼️';
-    if (['txt', 'md'].includes(ext)) icon = '📝';
+        if (!data || data.length === 0) {
+            sessionList.innerHTML = '<p class="empty-hint">暂无历史会话</p>';
+            return;
+        }
 
-    div.innerHTML = `
-        <span class="file-icon">${icon}</span>
-        <span class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-        <span class="file-status ${success ? '' : 'error'}">${success ? '✓' : '✕'}</span>
-    `;
+        const grouped = new Map();
+        data.forEach(session => {
+            const bucket = formatSessionBucket(session.updated_at || session.created_at);
+            if (!grouped.has(bucket)) grouped.set(bucket, []);
+            grouped.get(bucket).push(session);
+        });
 
-    if (error) {
-        div.title = error;
+        const bucketOrder = ['今天', '昨天', '最近 7 天', '更早'];
+        bucketOrder.forEach(bucket => {
+            const sessions = grouped.get(bucket);
+            if (!sessions || sessions.length === 0) return;
+
+            const section = document.createElement('section');
+            section.className = 'session-group';
+
+            const heading = document.createElement('div');
+            heading.className = 'session-group-title';
+            heading.textContent = bucket;
+            section.appendChild(heading);
+
+            sessions.forEach(session => {
+                const div = document.createElement('div');
+                div.className = `session-item${session.session_id === sessionId ? ' active' : ''}`;
+                div.dataset.sessionId = session.session_id;
+
+                const title = getSessionTitle(session);
+                const preview = session.last_message_preview || '';
+                const metaParts = [];
+                if (session.updated_at || session.created_at) {
+                    metaParts.push(formatSessionTime(session.updated_at || session.created_at));
+                }
+                if (session.message_count) {
+                    metaParts.push(`${session.message_count}条消息`);
+                }
+
+                const dataBadges = [];
+                if (session.has_resume_data) dataBadges.push('<span class="session-badge resume">简历</span>');
+                if (session.has_jd_data) dataBadges.push('<span class="session-badge jd">JD</span>');
+
+                div.innerHTML = `
+                    <div class="session-main">
+                        <div class="session-title-row">
+                            <div class="session-title">${escapeHtml(title)}</div>
+                            <button class="session-more" type="button" tabindex="-1" aria-label="会话操作">⋯</button>
+                        </div>
+                        ${preview && preview !== title ? `<div class="session-preview">${escapeHtml(preview)}</div>` : ''}
+                        <div class="session-meta">
+                            ${metaParts.length > 0 ? `<span class="session-msg-count">${escapeHtml(metaParts.join(' · '))}</span>` : ''}
+                            ${dataBadges.join('')}
+                        </div>
+                    </div>
+                `;
+
+                const moreBtn = div.querySelector('.session-more');
+                if (moreBtn) {
+                    moreBtn.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                    });
+                }
+                div.addEventListener('click', () => switchToSession(session.session_id));
+                section.appendChild(div);
+            });
+
+            sessionList.appendChild(section);
+        });
+    } catch (e) {
+        console.warn('加载会话列表失败:', e);
     }
+}
 
-    fileList.appendChild(div);
+async function switchToSession(targetSessionId) {
+    if (isProcessing || targetSessionId === sessionId) return;
+    isProcessing = true;
+
+    try {
+        // 获取目标会话的消息历史
+        const res = await fetch(`${API_BASE}/agent/sessions/${targetSessionId}/messages`);
+        if (!res.ok) {
+            console.warn('获取会话消息失败:', res.status);
+            isProcessing = false;
+            return;
+        }
+        const data = await res.json();
+
+        // 切换 sessionId
+        sessionId = targetSessionId;
+        localStorage.setItem('agent_session_id', sessionId);
+
+        // 清空当前聊天区域
+        chatMessages.innerHTML = '';
+
+        // 渲染历史消息
+        if (data.messages && data.messages.length > 0) {
+            for (const msg of data.messages) {
+                if (msg.role === 'user') {
+                    appendMessage('user', msg.content);
+                } else if (msg.role === 'assistant') {
+                    const routeType = msg.route_type || msg.task_type || null;
+                    appendMessage('ai', msg.content, [], routeType, true);
+                }
+            }
+        } else {
+            showWelcome();
+        }
+
+        // 更新侧边栏选中状态
+        sessionList.querySelectorAll('.session-item').forEach(el => {
+            el.classList.toggle('active', el.dataset.sessionId === targetSessionId);
+        });
+
+        setStatus('就绪', 'ready');
+    } catch (err) {
+        console.error('切换会话失败:', err);
+    } finally {
+        isProcessing = false;
+    }
 }
 
 // --- 图片预览管理 ---
@@ -1206,6 +1415,8 @@ async function analyzeJD(file, text) {
                             }
                         }
                         setStatus('就绪', 'ready');
+                        // JD 分析完成后刷新会话列表
+                        loadSessionList();
 
                     } else if (payload.type === 'error') {
                         removeTypingIndicator();
@@ -1288,6 +1499,10 @@ fileInput.addEventListener('change', (e) => {
     }
 });
 
+btnRefreshSessions.addEventListener('click', () => {
+    loadSessionList();
+});
+
 btnImage.addEventListener('click', () => imageInput.click());
 imageInput.addEventListener('change', (e) => {
     if (e.target.files.length > 0) {
@@ -1314,18 +1529,5 @@ btnNewSession.addEventListener('click', () => {
 });
 
 // --- 初始化 ---
-async function loadFileList() {
-    try {
-        const res = await fetch(`${API_BASE}/ingest/files`);
-        if (res.ok) {
-            const data = await res.json();
-            if (data.files && data.files.length > 0) {
-                fileList.querySelector('.empty-hint')?.remove();
-                data.files.forEach(f => addFileToList(f.name, true));
-            }
-        }
-    } catch (e) {}
-}
-
-loadFileList();
+loadSessionList();
 showWelcome();

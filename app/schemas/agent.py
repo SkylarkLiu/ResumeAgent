@@ -35,6 +35,33 @@ class SessionInfo(BaseModel):
     message_count: int
 
 
+class SessionListItem(BaseModel):
+    """会话列表条目"""
+    session_id: str
+    title: str = Field(default="", description="会话标题")
+    message_count: int = 0
+    last_message_preview: str = Field(default="", description="最后一条消息预览")
+    has_resume_data: bool = False
+    has_jd_data: bool = False
+    task_type: str = Field(default="", description="最近一次任务类型")
+    created_at: str = Field(default="", description="创建时间")
+    updated_at: str = Field(default="", description="最近更新时间")
+
+
+class SessionMessageItem(BaseModel):
+    """会话消息条目"""
+    role: str = Field(description="角色: user / assistant")
+    content: str = Field(default="", description="消息内容")
+    task_type: str = Field(default="", description="任务类型（仅 assistant 消息有）")
+    route_type: str = Field(default="", description="路由类型（仅 assistant 消息有）")
+
+
+class SessionMessagesResponse(BaseModel):
+    """会话消息列表响应"""
+    session_id: str
+    messages: list[SessionMessageItem] = Field(default_factory=list)
+
+
 class ResumeAnalysisRequest(BaseModel):
     """简历分析请求（支持文本粘贴）"""
     resume_text: str = Field(default="", description="简历文本内容（直接粘贴）")

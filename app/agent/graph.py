@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 from app.agent.agents import (
     build_jd_expert_node,
     build_qa_flow_subgraph,
+    build_react_fallback_node,
     build_resume_expert_node,
     generate_final_node,
     supervisor_plan_node,
@@ -96,6 +97,7 @@ def build_agent_graph(
     builder.add_node("qa_flow", _qa_flow_subgraph)
     builder.add_node("jd_expert", build_jd_expert_node(_jd_analysis_subgraph))
     builder.add_node("resume_expert", build_resume_expert_node(_resume_analysis_subgraph))
+    builder.add_node("react_fallback", build_react_fallback_node(retrieval_service, web_search_service))
     builder.add_node("supervisor_review", supervisor_review_node)
     builder.add_node("generate_final", generate_final_node)
 
@@ -108,6 +110,7 @@ def build_agent_graph(
             "qa_flow": "qa_flow",
             "jd_expert": "jd_expert",
             "resume_expert": "resume_expert",
+            "react_fallback": "react_fallback",
             "respond": "generate_final",
         },
     )
@@ -115,6 +118,7 @@ def build_agent_graph(
     builder.add_edge("qa_flow", "supervisor_review")
     builder.add_edge("jd_expert", "supervisor_review")
     builder.add_edge("resume_expert", "supervisor_review")
+    builder.add_edge("react_fallback", "supervisor_review")
 
     builder.add_conditional_edges(
         "supervisor_review",

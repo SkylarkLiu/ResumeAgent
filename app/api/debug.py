@@ -61,6 +61,33 @@ async def debug_runtime():
                     "expert_cache_entries": _count_cache_entries(values.get("expert_cache", {})),
                 })
 
+        # AsyncPostgresSaver: 直接查 PG 获取 thread 列表
+        # 注意：AsyncPostgresSaver 没有 alist_threads 方法
+        elif hasattr(_checkpointer, "alist"):
+            try:
+                from app.core.config import get_settings as _get_settings
+                _settings = _get_settings()
+                db_url = (getattr(_settings, "checkpoint_db_url", "") or "").strip()
+                if db_url:
+                    from psycopg import AsyncConnection
+                    from psycopg.rows import dict_row
+                    async with await AsyncConnection.connect(
+                        db_url, autocommit=True, row_factory=dict_row
+                    ) as conn:
+                        cur = await conn.execute("""
+                            SELECT thread_id, COUNT(*) as cnt
+                            FROM checkpoints
+                            GROUP BY thread_id
+                        """)
+                        for row in await cur.fetchall():
+                            thread_list.append({
+                                "thread_id": row["thread_id"],
+                                "message_count": 0,
+                                "checkpoint_count": row["cnt"],
+                            })
+            except Exception as e:
+                logger.debug("[debug] PG 线程列表查询失败: %s", e)
+
     cache_store = get_cache_store()
     cache_backend = get_cache_store_backend()
 

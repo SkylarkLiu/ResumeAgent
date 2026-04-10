@@ -14,7 +14,8 @@
                            │  │       ↑                    │  (KB/Web/Direct) │  │
                            │  │       │                    ├─ Resume Expert   │  │
                            │  │  supervisor_review         │  (提取+分析)     │  │
-                           │  │       │                    └─ JD Expert       │  │
+                           │  │       │                    ├─ JD Expert       │  │
+                           │  │       │                    └─ ReAct Fallback  │  │
                            │  │       └─ generate_final                        │  │
                            │  └────────────────────────────────────────────────┘  │
                            └──────────────────────────────────────────────────────┘
@@ -28,6 +29,7 @@
 - **QA Expert**：支持知识库检索 / 联网搜索 / 直接回答三种路径，KB 检索质量不足时自动降级到 Web Search
 - **Resume Expert**：简历结构化提取 → JD 匹配检索 → 分析报告生成，支持追问与缓存复用
 - **JD Expert**：JD 结构化提取 → 岗位解读报告，支持追问与缓存复用
+- **ReAct Fallback**：只处理非标准组合问题，内部以受控 tool-call 方式编排 `search_kb / search_web / extract_jd / extract_resume / match_resume_jd / generate_report` 等工具，必要时可回切到标准 Expert
 
 ### 核心能力
 
@@ -41,6 +43,8 @@
 | **JD 分析** | 粘贴或上传岗位描述，自动提取结构化岗位信息并生成岗位解读与简历建议 |
 | **多轮对话** | 支持 LangGraph checkpointer 按 thread 持久化会话状态，生产环境可落 PostgreSQL |
 | **结果缓存** | Expert 节点带 session 级缓存，相同问题+上下文命中时跳过执行，直接返回 |
+| **ReAct 兜底** | 非标准问题可进入受控 ReAct fallback，支持 tool cache、工具组合白名单、handoff 回切标准 Expert |
+| **会话历史** | 会话消息按用户/助手 turn 归一化，左侧历史支持 GPT 风格标题与分组展示 |
 | **图片理解** | GLM-4V-Flash 视觉模型，扫描件/截图自动 OCR + 语义理解 |
 
 ## 技术栈
@@ -160,7 +164,9 @@ ResumeAgent/
 │   │   │   ├── expert_nodes.py    #     Expert 节点 wrapper（QA/Resume/JD）
 │   │   │   ├── expert_cache.py    #     Expert 缓存逻辑
 │   │   │   ├── cache_store.py     #     缓存存储后端（State/PostgreSQL）
-│   │   │   └── qa_flow.py         #     QA 子图（KB → 评估 → 降级 → 生成）
+│   │   │   ├── qa_flow.py         #     QA 子图（KB → 评估 → 降级 → 生成）
+│   │   │   ├── react_fallback.py  #     非标准请求兜底（受控 ReAct）
+│   │   │   └── react_tools.py     #     ReAct 工具 registry / schema / cache key
 │   │   ├── subgraphs/             #   分析子图定义
 │   │   │   ├── resume_analysis.py
 │   │   │   └── jd_analysis.py
@@ -196,7 +202,7 @@ ResumeAgent/
 │   │   ├── file.py
 │   │   └── ingest.py
 │   ├── services/                  # 业务服务层
-│   │   ├── llm_service.py         #   智谱 GLM 调用（同步/异步/流式）
+│   │   ├── llm_service.py         #   智谱 GLM 调用（同步/异步/流式/tool-call）
 │   │   ├── embedding_service.py   #   Embedding 服务
 │   │   ├── vision_service.py      #   视觉理解服务（GLM-4V-Flash）
 │   │   ├── pdf_service.py         #   PDF 处理服务
@@ -216,7 +222,9 @@ ResumeAgent/
 │   ├── test_multi_step.py         #   多轮对话测试（3个）
 │   ├── test_cache_hit.py          #   缓存命中测试（4个）
 │   ├── test_kb_fallback.py        #   KB 降级测试（14个）
-│   └── test_persistence.py        #   持久化测试（9个）
+│   ├── test_persistence.py        #   持久化测试（9个）
+│   └── react_fallback_manual_checklist.md  # ReAct fallback 联调清单
+├── skills/                        # Codex 开发/运维辅助 skills（非运行时模块）
 ├── knowledge-base/                # 种子知识库文档（Markdown）
 ├── data/faiss_index/              # FAISS 索引存储（gitignore）
 ├── API_REFERENCE.md               # API 接口文档

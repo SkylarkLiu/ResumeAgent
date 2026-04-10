@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Generator
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from zai import ZhipuAiClient
 
@@ -121,6 +121,77 @@ def chat_completion_stream(
             yield delta.content
         elif hasattr(delta, "reasoning_content") and delta.reasoning_content:
             yield delta.reasoning_content
+
+
+def chat_completion_with_tools(
+    messages: list[dict],
+    tools: list[dict],
+    *,
+    model: str | None = None,
+    temperature: float = 0.3,
+    max_tokens: int = 2048,
+    tool_choice: str = "auto",
+    thinking: dict | None = None,
+) -> dict[str, Any]:
+    """
+    调用智谱 ChatCompletion API（带 tools），返回文本内容和工具调用。
+
+    Returns:
+        {
+            "content": str,
+            "tool_calls": [
+                {
+                    "id": str,
+                    "name": str,
+                    "arguments": str,
+                }
+            ],
+            "finish_reason": str | None,
+        }
+    """
+    client = get_llm_client()
+    model = model or _settings.llm_model_name
+
+    logger.debug(
+        "调用 LLM tools: model=%s, messages=%d条, tools=%d, tool_choice=%s",
+        model,
+        len(messages),
+        len(tools),
+        tool_choice,
+    )
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if thinking is not None:
+        kwargs["thinking"] = thinking
+
+    response = client.chat.completions.create(**kwargs)
+    choice = response.choices[0]
+    message = choice.message
+
+    content = getattr(message, "content", None) or ""
+    tool_calls = []
+    for tool_call in getattr(message, "tool_calls", []) or []:
+        function = getattr(tool_call, "function", None)
+        tool_calls.append(
+            {
+                "id": getattr(tool_call, "id", "") or "",
+                "name": getattr(function, "name", "") or "",
+                "arguments": getattr(function, "arguments", "") or "",
+            }
+        )
+
+    return {
+        "content": content,
+        "tool_calls": tool_calls,
+        "finish_reason": getattr(choice, "finish_reason", None),
+    }
 
 
 async def chat_completion_async(
