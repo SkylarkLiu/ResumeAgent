@@ -24,6 +24,8 @@ class TaskType(str, Enum):
     QA = "qa"
     RESUME_ANALYSIS = "resume_analysis"
     JD_ANALYSIS = "jd_analysis"
+    INTERVIEW_SIMULATION = "interview_simulation"
+    INTERVIEW_FOLLOWUP = "interview_followup"
     JD_FOLLOWUP = "jd_followup"
     RESUME_FOLLOWUP = "resume_followup"
     MATCH_FOLLOWUP = "match_followup"
@@ -86,6 +88,11 @@ class AgentState(TypedDict, total=False):
     # 输入阶段: {"raw_text": str}（JD 原文）
     # 提取后: {"position", "company", "skills_must", "tech_stack", "summary", ...}
     jd_data: dict | None
+    interview_data: dict | None
+
+    # ---- 分层裁剪：对话摘要 ----
+    # 早期消息的压缩摘要文本（由 generate 节点维护，持久化到 checkpointer）
+    conversation_summary: str
 
     # ---- 检索降级标记 ----
     # 当 KB 检索结果质量不足时，标记为 True，触发降级到 web search

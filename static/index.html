@@ -29,6 +29,7 @@
             <header id="header">
                 <h1>多模态文档问答助手</h1>
                 <div id="header-actions">
+                    <button id="btn-interview" class="btn-header btn-interview" title="模拟面试">🎤 模拟面试</button>
                     <button id="btn-jd" class="btn-header btn-jd" title="岗位JD分析">🎯 岗位分析</button>
                     <button id="btn-resume" class="btn-header btn-resume" title="简历分析">📋 简历分析</button>
                     <button id="btn-new-session" class="btn-header" title="新建会话">🔄 新建会话</button>
@@ -51,6 +52,7 @@
                 <div id="input-actions">
                     <button id="btn-upload" title="上传文件到知识库">📎</button>
                     <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.txt,.md" hidden multiple>
+                    <button id="btn-voice" title="语音输入">🎙️</button>
                     <button id="btn-image" title="发送图片问答">🖼️</button>
                     <input type="file" id="image-input" accept=".png,.jpg,.jpeg" hidden>
                 </div>
@@ -160,6 +162,22 @@
             </div>
 
             <button id="btn-start-jd-analysis" class="btn-primary btn-jd-primary">🔍 开始分析</button>
+        </div>
+    </div>
+
+    <!-- 模拟面试模态框 -->
+    <div id="interview-modal" class="modal hidden">
+        <div class="modal-content jd-modal-content">
+            <div class="jd-modal-header">
+                <h3>🎤 模拟面试</h3>
+                <button id="btn-close-interview" class="btn-modal-close">✕</button>
+            </div>
+            <div class="resume-options">
+                <input type="text" id="interview-focus" placeholder="面试重点（选填，如：RAG / Agent 工程 / 后端系统设计）">
+                <input type="text" id="interview-count" placeholder="题量（选填，默认 5 题，如：3）">
+            </div>
+            <p class="drop-hint" style="margin-top: 10px;">会自动结合当前会话中的 JD、简历和历史对话生成题目，并对你的作答逐题评分。</p>
+            <button id="btn-start-interview" class="btn-primary btn-interview-primary">🚀 开始模拟面试</button>
         </div>
     </div>
 
