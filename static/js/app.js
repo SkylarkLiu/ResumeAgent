@@ -21,6 +21,8 @@ function resetSession() {
     sessionId = generateSessionId();
     localStorage.setItem('agent_session_id', sessionId);
     chatMessages.innerHTML = '';
+    isInInterviewMode = false;
+    messageInput.placeholder = '输入你的问题…';
     showWelcome();
     loadSessionList();
 }
@@ -66,6 +68,7 @@ const btnNewSession = document.getElementById('btn-new-session');
 
 // 简历分析相关 DOM
 const btnResume = document.getElementById('btn-resume');
+const btnInterview = document.getElementById('btn-interview');
 const resumeModal = document.getElementById('resume-modal');
 const btnCloseResume = document.getElementById('btn-close-resume');
 const resumeTabs = document.querySelectorAll('.resume-tab');
@@ -80,6 +83,12 @@ const resumeTextInput = document.getElementById('resume-text-input');
 const resumePosition = document.getElementById('resume-position');
 const resumeQuestion = document.getElementById('resume-question');
 const btnStartAnalysis = document.getElementById('btn-start-analysis');
+const btnVoice = document.getElementById('btn-voice');
+const interviewModal = document.getElementById('interview-modal');
+const btnCloseInterview = document.getElementById('btn-close-interview');
+const interviewFocus = document.getElementById('interview-focus');
+const interviewCount = document.getElementById('interview-count');
+const btnStartInterview = document.getElementById('btn-start-interview');
 
 // JD 分析相关 DOM
 const btnJd = document.getElementById('btn-jd');
@@ -101,6 +110,9 @@ let pendingImageBase64 = null;
 let pendingResumeFile = null;
 let pendingJdFile = null;
 let isProcessing = false;
+let speechRecognition = null;
+let isVoiceListening = false;
+let isInInterviewMode = false;  // 面试模式标记
 
 // --- 工具函数 ---
 function scrollToBottom() {
@@ -238,7 +250,9 @@ function appendMessage(role, content, sources = null, routeType = null, isMarkdo
                 web: '🌐 网络',
                 direct: '💬 直接回答',
                 resume_analysis: '📋 简历分析',
-                jd_analysis: '🎯 岗位分析'
+                jd_analysis: '🎯 岗位分析',
+                interview_simulation: '🎤 模拟面试',
+                interview_followup: '🎤 面试追问'
             };
             html += `<span class="route-tag ${routeType}">${routeLabels[routeType] || routeType}</span><br>`;
         }
@@ -290,6 +304,7 @@ function buildAgentTimelineHtml(agentSteps) {
         qa_flow: 'QA 专家',
         jd_expert: 'JD 专家',
         resume_expert: '简历专家',
+        interview_expert: '面试专家',
         react_fallback: 'ReAct 兜底'
     };
 
@@ -314,6 +329,8 @@ function buildPlanningMetaHtml(planningMeta) {
         jd_followup: 'JD 追问',
         resume_followup: '简历追问',
         match_followup: '匹配追问',
+        interview_simulation: '模拟面试',
+        interview_followup: '面试追问',
         react_fallback: 'ReAct 兜底'
     };
 
@@ -379,6 +396,10 @@ function buildObsTagsHtml(obsMeta) {
         kb_low_relevance: '🔄',
         tool_running: '🛠️',
         tool_used: '✅',
+        interview_start: '🎤',
+        interview_progress: '📝',
+        interview_score: '📊',
+        interview_summary: '🏁',
     };
     const labels = {
         cache_hit: '命中缓存',
@@ -389,6 +410,10 @@ function buildObsTagsHtml(obsMeta) {
         kb_low_relevance: 'KB 降级搜索',
         tool_running: '工具运行中',
         tool_used: '已调用工具',
+        interview_start: '模拟面试',
+        interview_progress: '面试进度',
+        interview_score: '面试评分',
+        interview_summary: '面试复盘',
     };
     const items = obsMeta.map(tag => {
         const icon = icons[tag.type] || 'ℹ️';
@@ -410,6 +435,8 @@ function renderAiMessageContent({ routeType, fullAnswer, currentSources, agentSt
         jd_followup: '🎯 JD 追问',
         resume_followup: '📋 简历追问',
         match_followup: '🧩 匹配追问',
+        interview_simulation: '🎤 模拟面试',
+        interview_followup: '🎤 面试追问',
         react_fallback: '🛠️ ReAct 兜底'
     };
 
@@ -539,6 +566,7 @@ async function sendChat(question) {
                             qa_flow: '正在检索知识库',
                             jd_expert: '正在分析岗位描述',
                             resume_expert: '正在评估简历',
+                            interview_expert: '正在进行模拟面试',
                             react_fallback: '正在组合工具处理非标准请求'
                         };
                         setStatus(statusLabels[payload.agent] || '处理中', 'processing');
@@ -662,6 +690,57 @@ async function sendChat(question) {
                             }
                         }
 
+                    } else if (payload.type === 'interview_progress') {
+                        // 面试进度事件
+                        const phase = payload.phase || '';
+                        const qIdx = payload.question_index || 0;
+                        const total = payload.total_questions || 0;
+                        const curScore = payload.current_score || 0;
+                        const avgScore = payload.average_score || 0;
+                        if (phase === 'start') {
+                            if (!obsMeta.find(t => t.type === 'interview_start')) {
+                                obsMeta.push({ type: 'interview_start', detail: total ? `${total} 题` : '' });
+                            }
+                        } else if (phase === 'question') {
+                            if (!obsMeta.find(t => t.type === 'interview_progress')) {
+                                obsMeta.push({ type: 'interview_progress', detail: `第 ${qIdx + 1}/${total} 题` });
+                            } else {
+                                const tag = obsMeta.find(t => t.type === 'interview_progress');
+                                tag.detail = `第 ${qIdx + 1}/${total} 题`;
+                            }
+                        } else if (phase === 'evaluated') {
+                            if (!obsMeta.find(t => t.type === 'interview_score')) {
+                                obsMeta.push({ type: 'interview_score', detail: `本轮 ${curScore} · 均分 ${avgScore}` });
+                            } else {
+                                const tag = obsMeta.find(t => t.type === 'interview_score');
+                                tag.detail = `本轮 ${curScore} · 均分 ${avgScore}`;
+                            }
+                            if (obsMeta.find(t => t.type === 'interview_progress')) {
+                                const tag = obsMeta.find(t => t.type === 'interview_progress');
+                                tag.detail = `第 ${qIdx + 1}/${total} 题`;
+                            }
+                            // 面试模式下，评分后自动 focus 输入框
+                            if (isInInterviewMode) {
+                                messageInput.focus();
+                            }
+                        } else if (phase === 'summary') {
+                            if (!obsMeta.find(t => t.type === 'interview_summary')) {
+                                obsMeta.push({ type: 'interview_summary', detail: '生成复盘报告' });
+                            }
+                        }
+                        // 实时更新消息区域的标签
+                        if (msgDiv) {
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                                planningMeta,
+                                obsMeta,
+                            });
+                        }
+
                     } else if (payload.type === 'sources') {
                         // 检索来源
                         currentSources = payload.sources || [];
@@ -711,6 +790,15 @@ async function sendChat(question) {
                         if (payload.session_id && payload.session_id !== sessionId) {
                             sessionId = payload.session_id;
                             localStorage.setItem('agent_session_id', sessionId);
+                        }
+                        // 检测面试结束 → 退出面试模式
+                        if (isInInterviewMode && fullAnswer && (fullAnswer.includes('模拟面试结束') || fullAnswer.includes('模拟面试已结束'))) {
+                            isInInterviewMode = false;
+                            messageInput.placeholder = '输入你的问题…';
+                        }
+                        // 面试模式下评分后自动 focus
+                        if (isInInterviewMode) {
+                            messageInput.focus();
                         }
                         setStatus('就绪', 'ready');
                         // 对话完成后刷新会话列表
@@ -1517,6 +1605,74 @@ function clearImagePreview() {
     imagePreview.classList.add('hidden');
 }
 
+function buildInterviewPrompt() {
+    const focus = interviewFocus.value.trim();
+    const count = interviewCount.value.trim();
+    let prompt = '请开始一轮模拟面试。请结合当前会话中的 JD、简历和历史对话生成面试题，并在我每次回答后给出评分、分析和下一题。';
+    if (focus) {
+        prompt += ` 面试重点：${focus}。`;
+    }
+    if (count) {
+        prompt += ` 本轮请控制在 ${count} 题左右。`;
+    }
+    return prompt;
+}
+
+function closeInterviewModal() {
+    interviewModal.classList.add('hidden');
+}
+
+function initVoiceInput() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        btnVoice.disabled = true;
+        btnVoice.title = '当前浏览器不支持语音输入（请使用 Chrome 或 Edge）';
+        btnVoice.style.opacity = '0.4';
+        // 在语音按钮旁显示降级提示
+        const hint = document.createElement('span');
+        hint.textContent = '请使用 Chrome/Edge';
+        hint.style.cssText = 'font-size:11px;color:var(--text-secondary);margin-left:4px;';
+        btnVoice.parentNode.insertBefore(hint, btnVoice.nextSibling);
+        return;
+    }
+
+    speechRecognition = new SpeechRecognition();
+    speechRecognition.lang = 'zh-CN';
+    speechRecognition.continuous = false;
+    speechRecognition.interimResults = true;
+
+    speechRecognition.onstart = () => {
+        isVoiceListening = true;
+        btnVoice.classList.add('listening');
+        setStatus('语音输入中', 'processing');
+    };
+
+    speechRecognition.onresult = (event) => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+            transcript += event.results[i][0].transcript;
+        }
+        messageInput.value = transcript.trim();
+        messageInput.dispatchEvent(new Event('input'));
+    };
+
+    speechRecognition.onend = () => {
+        isVoiceListening = false;
+        btnVoice.classList.remove('listening');
+        setStatus('就绪', 'ready');
+    };
+
+    speechRecognition.onerror = (event) => {
+        isVoiceListening = false;
+        btnVoice.classList.remove('listening');
+        if (event.error === 'not-allowed') {
+            setStatus('麦克风权限被拒绝', 'error');
+        } else {
+            setStatus('语音识别失败', 'error');
+        }
+    };
+}
+
 clearImageBtn.addEventListener('click', clearImagePreview);
 
 btnCloseModal.addEventListener('click', () => {
@@ -1528,6 +1684,32 @@ btnNewSession.addEventListener('click', () => {
     resetSession();
 });
 
+btnInterview.addEventListener('click', () => {
+    interviewModal.classList.remove('hidden');
+});
+
+btnCloseInterview.addEventListener('click', closeInterviewModal);
+
+btnStartInterview.addEventListener('click', () => {
+    const prompt = buildInterviewPrompt();
+    closeInterviewModal();
+    // 进入面试模式
+    isInInterviewMode = true;
+    messageInput.placeholder = '🎤 语音作答或输入答案…';
+    messageInput.focus();
+    sendChat(prompt);
+});
+
+btnVoice.addEventListener('click', () => {
+    if (!speechRecognition) return;
+    if (isVoiceListening) {
+        speechRecognition.stop();
+        return;
+    }
+    speechRecognition.start();
+});
+
 // --- 初始化 ---
 loadSessionList();
 showWelcome();
+initVoiceInput();

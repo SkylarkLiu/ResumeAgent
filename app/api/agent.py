@@ -199,6 +199,8 @@ def _build_chat_turn_input_state(question: str, session_id: str, session_values:
         "messages": [HumanMessage(content=question)],
         "context_sources": session_values.get("context_sources", []),
         "working_context": session_values.get("working_context", ""),
+        "interview_data": session_values.get("interview_data"),
+        "conversation_summary": session_values.get("conversation_summary", ""),
         "final_answer": "",
         "execution_plan": [],
         "current_step": 0,
@@ -525,6 +527,15 @@ async def agent_chat_stream(request: AgentChatRequest):
                         })
                     elif event_type == "status":
                         yield _sse_event({"type": "status", "content": payload.get("content", "")})
+                    elif event_type == "interview_progress":
+                        yield _sse_event({
+                            "type": "interview_progress",
+                            "phase": payload.get("phase", ""),
+                            "question_index": payload.get("question_index", 0),
+                            "total_questions": payload.get("total_questions", 0),
+                            "current_score": payload.get("current_score", 0),
+                            "average_score": payload.get("average_score", 0),
+                        })
                     elif event_type == "sources":
                         sources_api = _build_sources(payload.get("sources", []))
                         yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
@@ -562,6 +573,8 @@ async def agent_chat_stream(request: AgentChatRequest):
                         final_answer = payload["resume_expert"].get("final_answer", final_answer)
                     if "jd_expert" in payload:
                         final_answer = payload["jd_expert"].get("final_answer", final_answer)
+                    if "interview_expert" in payload:
+                        final_answer = payload["interview_expert"].get("final_answer", final_answer)
                     if "react_fallback" in payload:
                         final_answer = payload["react_fallback"].get("final_answer", final_answer)
                     if "generate_final" in payload:

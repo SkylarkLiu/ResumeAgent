@@ -50,8 +50,14 @@ class Settings(BaseSettings):
     allowed_extensions: list[str] = [".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md"]
 
     # ---- Agent ----
-    agent_max_history: int = 20
+    agent_max_history: int = 20  # 兼容旧逻辑（MVP session_manager 仍使用）
     agent_default_route: str = "direct"  # fallback 路由
+
+    # ---- 分层裁剪（方案 A） ----
+    # 最近 N 条完整保留，更早消息压缩为摘要
+    agent_recent_message_count: int = 10  # 完整保留的最近消息条数
+    agent_summary_max_chars: int = 120  # 摘要层每条消息截断字符数
+    agent_summary_token_budget: int = 800  # 摘要层 token 预算（0=不限）
 
     # ---- Web 搜索 ----
     tavily_api_key: str = ""

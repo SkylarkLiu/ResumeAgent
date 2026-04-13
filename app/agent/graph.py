@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agent.agents import (
     build_jd_expert_node,
+    interview_expert_node,
     build_qa_flow_subgraph,
     build_react_fallback_node,
     build_resume_expert_node,
@@ -19,7 +20,7 @@ from app.agent.agents import (
     supervisor_review_route,
 )
 from app.agent.checkpointer import get_checkpointer
-from app.agent.nodes.generate import set_max_history
+from app.agent.nodes.generate import set_layered_config, set_max_history
 from app.agent.nodes.kb_search import set_retrieval_service
 from app.agent.nodes.normalize import set_max_chars
 from app.agent.nodes.retrieve_jd import set_retrieval_service_jd
@@ -78,6 +79,11 @@ def build_agent_graph(
     set_retrieval_service_jd(retrieval_service, top_k=settings.top_k)
     set_web_search_service(web_search_service, max_results=settings.web_search_max_results)
     set_max_history(settings.agent_max_history)
+    set_layered_config(
+        recent_count=settings.agent_recent_message_count,
+        summary_max_chars=settings.agent_summary_max_chars,
+        summary_token_budget=settings.agent_summary_token_budget,
+    )
     set_max_chars(settings.web_search_result_max_chars)
 
     global _qa_flow_subgraph, _resume_analysis_subgraph, _jd_analysis_subgraph
@@ -97,6 +103,7 @@ def build_agent_graph(
     builder.add_node("qa_flow", _qa_flow_subgraph)
     builder.add_node("jd_expert", build_jd_expert_node(_jd_analysis_subgraph))
     builder.add_node("resume_expert", build_resume_expert_node(_resume_analysis_subgraph))
+    builder.add_node("interview_expert", interview_expert_node)
     builder.add_node("react_fallback", build_react_fallback_node(retrieval_service, web_search_service))
     builder.add_node("supervisor_review", supervisor_review_node)
     builder.add_node("generate_final", generate_final_node)
@@ -110,6 +117,7 @@ def build_agent_graph(
             "qa_flow": "qa_flow",
             "jd_expert": "jd_expert",
             "resume_expert": "resume_expert",
+            "interview_expert": "interview_expert",
             "react_fallback": "react_fallback",
             "respond": "generate_final",
         },
@@ -118,6 +126,7 @@ def build_agent_graph(
     builder.add_edge("qa_flow", "supervisor_review")
     builder.add_edge("jd_expert", "supervisor_review")
     builder.add_edge("resume_expert", "supervisor_review")
+    builder.add_edge("interview_expert", "supervisor_review")
     builder.add_edge("react_fallback", "supervisor_review")
 
     builder.add_conditional_edges(

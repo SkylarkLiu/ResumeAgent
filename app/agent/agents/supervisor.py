@@ -28,7 +28,7 @@ def _emit_custom_event(payload: dict[str, Any]) -> None:
 
 
 def _normalize_agent_name(name: str | None) -> str | None:
-    if name in {"qa_flow", "jd_expert", "resume_expert", "react_fallback", "respond"}:
+    if name in {"qa_flow", "jd_expert", "resume_expert", "interview_expert", "react_fallback", "respond"}:
         return name
     return None
 
@@ -37,6 +37,7 @@ AGENT_STATUS_TEXT: dict[str, str] = {
     "qa_flow": "正在检索知识库",
     "jd_expert": "正在分析岗位描述",
     "resume_expert": "正在评估简历",
+    "interview_expert": "正在进行模拟面试",
     "react_fallback": "正在组合工具处理非标准请求",
 }
 
@@ -103,6 +104,7 @@ def _rule_based_followup_route(question: str, state: AgentState, web_search_avai
     q = question.lower()
     has_jd_data = bool(state.get("jd_data"))
     has_resume_data = bool(state.get("resume_data"))
+    interview_data = state.get("interview_data") or {}
 
     jd_followup_keywords = (
         "关于以上jd", "关于以上 jd", "关于这个jd", "关于这个 jd", "基于以上jd", "基于以上 jd",
@@ -111,7 +113,50 @@ def _rule_based_followup_route(question: str, state: AgentState, web_search_avai
     )
     resume_keywords = ("简历", "评估", "优化", "修改简历", "改简历", "简历建议", "润色", "重写")
     match_keywords = ("匹配度", "匹配", "是否匹配", "缺少什么", "差距", "缺口", "对比jd", "对比 jd", "改进什么", "补什么", "最该补", "最需要改进")
+    interview_keywords = ("模拟面试", "面试官", "开始面试", "mock interview", "面试题", "继续面试", "下一题", "请出题")
+    interview_summary_keywords = ("总结面试", "面试总结", "复盘", "面试复盘", "整体表现", "整体报告", "总评")
     latest_keywords = ("最新", "今天", "本周", "最近", "2026", "实时", "新闻")
+
+    # 面试进行中 → 追问
+    if interview_data.get("active"):
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.INTERVIEW_FOLLOWUP.value,
+            "planning_reason": "当前会话处于模拟面试中，按面试追问处理",
+            "question_signature": "interview_followup:active",
+            "response_mode": "interview_round",
+        }
+
+    # 面试已结束但有历史 → 用户要求总结/复盘 → 走 interview_expert 的总结路径
+    interview_history = interview_data.get("history") or []
+    if not interview_data.get("active") and interview_history and any(k in q for k in interview_summary_keywords):
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.INTERVIEW_SIMULATION.value,
+            "planning_reason": "面试已结束，用户要求总结复盘",
+            "question_signature": "interview:summary",
+            "response_mode": "interview_round",
+        }
+
+    # 面试已结束但有历史 → 用户追问面试相关话题（如"第3题怎么答"）
+    interview_topic_keywords = ("那道题", "第.*题", "那题", "这道题", "刚才的题", "那个问题", "面试", "interview")
+    if not interview_data.get("active") and interview_history and any(re.search(k, q) for k in interview_topic_keywords):
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.INTERVIEW_FOLLOWUP.value,
+            "planning_reason": "面试已结束，用户追问面试相关话题",
+            "question_signature": "interview_followup:post",
+            "response_mode": "interview_round",
+        }
+
+    if any(k in q for k in interview_keywords):
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.INTERVIEW_SIMULATION.value,
+            "planning_reason": "用户明确要求进入模拟面试或继续面试",
+            "question_signature": "interview:start",
+            "response_mode": "interview_round",
+        }
 
     if has_jd_data and (_is_resume_like_text(question) or (has_resume_data and any(k in q for k in match_keywords))):
         return {
@@ -348,6 +393,8 @@ def supervisor_plan_node(state: AgentState, *, web_search_available: bool = Fals
         execution_plan = ["jd_expert", "respond"]
     elif task_type in {"resume_analysis", "resume_followup", "match_followup"}:
         execution_plan = ["resume_expert", "respond"]
+    elif task_type in {"interview_simulation", "interview_followup"}:
+        execution_plan = ["interview_expert", "respond"]
     elif task_type == "react_fallback":
         execution_plan = ["react_fallback", "respond"]
     else:
@@ -419,7 +466,7 @@ def supervisor_review_node(state: AgentState) -> dict:
     agent_outputs = dict(state.get("agent_outputs", {}) or {})
     handoff_agent = _normalize_agent_name(state.get("react_handoff_agent"))
 
-    if active_agent in {"qa_flow", "jd_expert", "resume_expert", "react_fallback"}:
+    if active_agent in {"qa_flow", "jd_expert", "resume_expert", "interview_expert", "react_fallback"}:
         summary_payload: dict[str, Any] = {
             "summary": final_answer[:500],
             "final_answer": final_answer,
@@ -431,6 +478,10 @@ def supervisor_review_node(state: AgentState) -> dict:
         elif active_agent == "resume_expert":
             summary_payload["resume_data"] = state.get("resume_data")
             summary_payload["jd_data"] = state.get("jd_data")
+        elif active_agent == "interview_expert":
+            summary_payload["interview_data"] = state.get("interview_data")
+            summary_payload["jd_data"] = state.get("jd_data")
+            summary_payload["resume_data"] = state.get("resume_data")
         elif active_agent == "react_fallback":
             summary_payload["context_sources"] = state.get("context_sources", [])
             summary_payload["tool_trace"] = state.get("tool_trace", [])
@@ -475,7 +526,7 @@ def generate_final_node(state: AgentState) -> dict:
     """
     final_answer = state.get("final_answer", "")
     agent_outputs = state.get("agent_outputs", {}) or {}
-    execution_plan = [name for name in state.get("execution_plan", []) if name in {"qa_flow", "jd_expert", "resume_expert", "react_fallback"}]
+    execution_plan = [name for name in state.get("execution_plan", []) if name in {"qa_flow", "jd_expert", "resume_expert", "interview_expert", "react_fallback"}]
 
     if len(execution_plan) <= 1:
         if final_answer:
@@ -506,6 +557,7 @@ def generate_final_node(state: AgentState) -> dict:
             "qa_flow": "QA 专家",
             "jd_expert": "JD 专家",
             "resume_expert": "简历专家",
+            "interview_expert": "面试专家",
             "react_fallback": "ReAct 兜底",
         }.get(agent_name, agent_name)
         expert_blocks.append(f"## {label}\n{answer}")
