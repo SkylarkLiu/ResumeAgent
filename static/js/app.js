@@ -1,5 +1,5 @@
 /* ============================================
-   多模态文档问答助手 - 前端逻辑
+   智能简历优化与模拟面试助手 - 前端逻辑
    阶段 3：新增简历分析功能
    ============================================ */
 
@@ -31,7 +31,7 @@ function showWelcome() {
     const welcome = document.createElement('div');
     welcome.className = 'message welcome';
     welcome.innerHTML = `<div class="message-content">
-        <p>👋 你好！我是多模态文档问答助手。</p>
+        <p>👋 你好！我是智能简历优化与模拟面试助手。</p>
         <p>你可以：</p>
         <ul>
             <li>📤 上传 <strong>PDF / 图片 / 文本</strong> 文件到知识库</li>

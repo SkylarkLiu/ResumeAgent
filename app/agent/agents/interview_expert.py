@@ -283,10 +283,13 @@ async def interview_expert_node(state: AgentState) -> dict[str, Any]:
         response = await asyncio.to_thread(
             chat_completion,
             _build_start_messages(state, question),
-            0.4,
-            1600,
+            temperature=0.4,
+            max_tokens=1600,
+            thinking={"type": "disabled"},
         )
         data = _parse_json_from_response(response) or {}
+        if not data:
+            logger.warning("面试出题 JSON 解析失败，原始响应: %s", response[:500])
         questions = [str(item).strip() for item in (data.get("questions") or []) if str(item).strip()]
         if not questions:
             questions = [
@@ -328,10 +331,13 @@ async def interview_expert_node(state: AgentState) -> dict[str, Any]:
     response = await asyncio.to_thread(
         chat_completion,
         _build_evaluate_messages(state, question, interview_data),
-        0.3,
-        1400,
+        temperature=0.3,
+        max_tokens=1400,
+        thinking={"type": "disabled"},
     )
     data = _parse_json_from_response(response) or {}
+    if not data:
+        logger.warning("面试评分 JSON 解析失败，原始响应: %s", response[:500])
     score = max(0, min(100, int(data.get("score") or 0)))
     verdict = str(data.get("verdict") or "已完成本轮回答评估。").strip()
     strengths = [str(item).strip() for item in (data.get("strengths") or []) if str(item).strip()]
