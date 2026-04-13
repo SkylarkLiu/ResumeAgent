@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
     global _store, _rag, _metadata_store
 
     logger.info("=" * 50)
-    logger.info("多模态文档问答助手 V2 启动中... (LangGraph checkpointer)")
+    logger.info("智能简历优化与模拟面试助手 V2 启动中... (LangGraph checkpointer)")
     logger.info("=" * 50)
 
     # 初始化 metadata store
@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title="多模态文档问答助手",
+    title="智能简历优化与模拟面试助手",
     description="基于智谱 GLM-4V + FAISS 的多模态 RAG 问答系统",
     version="2.0.0",
     lifespan=lifespan,
@@ -162,7 +162,7 @@ async def root():
     index_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"message": "多模态文档问答助手 V2", "docs": "/docs"}
+    return {"message": "智能简历优化与模拟面试助手 V2", "docs": "/docs"}
 
 
 @app.get("/health")
