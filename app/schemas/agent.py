@@ -43,6 +43,7 @@ class SessionListItem(BaseModel):
     last_message_preview: str = Field(default="", description="最后一条消息预览")
     has_resume_data: bool = False
     has_jd_data: bool = False
+    has_summary_data: bool = False
     task_type: str = Field(default="", description="最近一次任务类型")
     created_at: str = Field(default="", description="创建时间")
     updated_at: str = Field(default="", description="最近更新时间")
@@ -54,6 +55,7 @@ class SessionMessageItem(BaseModel):
     content: str = Field(default="", description="消息内容")
     task_type: str = Field(default="", description="任务类型（仅 assistant 消息有）")
     route_type: str = Field(default="", description="路由类型（仅 assistant 消息有）")
+    summary_data: dict = Field(default_factory=dict, description="综合评估结构化结果（仅总结消息）")
 
 
 class SessionMessagesResponse(BaseModel):

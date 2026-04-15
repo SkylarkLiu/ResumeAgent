@@ -1,5 +1,8 @@
 """
-JD 分析子图。
+JD 分析流程。
+
+由 app/agent/subgraphs/jd_analysis.py 迁移而来，
+节点名、事件格式、函数签名保持不变，仅调整模块位置与 logger 命名。
 """
 from __future__ import annotations
 
@@ -15,11 +18,11 @@ from app.agent.nodes.analyze_jd import analyze_jd_stream
 from app.agent.nodes.extract_jd import extract_jd
 from app.core.logger import setup_logger
 
-logger = setup_logger("agent.subgraphs.jd_analysis")
+logger = setup_logger("agent.jd_flow")
 
 
 class JDAnalysisState(TypedDict, total=False):
-    """JD 分析子图关心的状态字段。"""
+    """JD 分析流程关心的状态字段。"""
 
     messages: Annotated[list[BaseMessage], add_messages]
     jd_data: dict | None
@@ -27,7 +30,7 @@ class JDAnalysisState(TypedDict, total=False):
 
 
 def _emit_custom_event(payload: dict[str, Any]) -> None:
-    """在 stream_mode=custom 下发送子图事件。"""
+    """在 stream_mode=custom 下发送流程事件。"""
     try:
         writer = get_stream_writer()
     except RuntimeError:
@@ -76,7 +79,7 @@ async def _stream_analyze_jd_node(state: JDAnalysisState) -> dict:
             raise RuntimeError(message)
 
     if final_result is None:
-        logger.warning("JD 分析子图未收到 done 事件，返回兜底结果")
+        logger.warning("JD 分析流程未收到 done 事件，返回兜底结果")
         final_result = {
             "final_answer": "❌ JD 分析未生成结果",
             "messages": [AIMessage(content="JD 分析未生成结果")],
@@ -84,8 +87,8 @@ async def _stream_analyze_jd_node(state: JDAnalysisState) -> dict:
     return final_result
 
 
-def build_jd_analysis_subgraph():
-    """构建 JD 分析子图。"""
+def build_jd_analysis_flow():
+    """构建 JD 分析流程。"""
     builder = StateGraph(JDAnalysisState)
     builder.add_node("extract_jd", _extract_jd_node)
     builder.add_node("analyze_jd", _stream_analyze_jd_node)
@@ -94,3 +97,7 @@ def build_jd_analysis_subgraph():
     builder.add_edge("extract_jd", "analyze_jd")
     builder.add_edge("analyze_jd", END)
     return builder.compile()
+
+
+# ── 兼容旧调用方 ──
+build_jd_analysis_subgraph = build_jd_analysis_flow

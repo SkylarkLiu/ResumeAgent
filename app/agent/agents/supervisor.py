@@ -28,7 +28,7 @@ def _emit_custom_event(payload: dict[str, Any]) -> None:
 
 
 def _normalize_agent_name(name: str | None) -> str | None:
-    if name in {"qa_flow", "jd_expert", "resume_expert", "interview_expert", "react_fallback", "respond"}:
+    if name in {"qa_flow", "jd_expert", "resume_expert", "interview_expert", "summary_expert", "react_fallback", "respond"}:
         return name
     return None
 
@@ -38,6 +38,7 @@ AGENT_STATUS_TEXT: dict[str, str] = {
     "jd_expert": "正在分析岗位描述",
     "resume_expert": "正在评估简历",
     "interview_expert": "正在进行模拟面试",
+    "summary_expert": "正在生成综合评估",
     "react_fallback": "正在组合工具处理非标准请求",
 }
 
@@ -115,6 +116,7 @@ def _rule_based_followup_route(question: str, state: AgentState, web_search_avai
     match_keywords = ("匹配度", "匹配", "是否匹配", "缺少什么", "差距", "缺口", "对比jd", "对比 jd", "改进什么", "补什么", "最该补", "最需要改进")
     interview_keywords = ("模拟面试", "面试官", "开始面试", "mock interview", "面试题", "继续面试", "下一题", "请出题")
     interview_summary_keywords = ("总结面试", "面试总结", "复盘", "面试复盘", "整体表现", "整体报告", "总评")
+    summary_keywords = ("综合评价", "综合评估", "综合打分", "能力雷达", "能力雷达图", "雷达图", "推荐资源", "总结专家", "整体能力评估", "生成总评")
     latest_keywords = ("最新", "今天", "本周", "最近", "2026", "实时", "新闻")
 
     # 面试进行中 → 追问
@@ -156,6 +158,15 @@ def _rule_based_followup_route(question: str, state: AgentState, web_search_avai
             "planning_reason": "用户明确要求进入模拟面试或继续面试",
             "question_signature": "interview:start",
             "response_mode": "interview_round",
+        }
+
+    if any(k in q for k in summary_keywords) and (has_jd_data or has_resume_data or interview_history):
+        return {
+            "route_type": RouteType.DIRECT.value,
+            "task_type": TaskType.SUMMARY_ASSESSMENT.value,
+            "planning_reason": "用户要求结合当前 JD、简历或面试结果做综合评估",
+            "question_signature": "summary_assessment:general",
+            "response_mode": "summary_report",
         }
 
     if has_jd_data and (_is_resume_like_text(question) or (has_resume_data and any(k in q for k in match_keywords))):
@@ -311,7 +322,7 @@ def _classify_task(state: AgentState, *, web_search_available: bool) -> dict[str
                 route_type.value,
                 decision.task_type.value,
                 f"{decision.task_type.value}:llm",
-                "direct_answer" if decision.task_type == TaskType.QA else ("full_report" if decision.task_type in {TaskType.RESUME_ANALYSIS, TaskType.JD_ANALYSIS} else "followup_brief"),
+                "direct_answer" if decision.task_type == TaskType.QA else ("summary_report" if decision.task_type == TaskType.SUMMARY_ASSESSMENT else ("full_report" if decision.task_type in {TaskType.RESUME_ANALYSIS, TaskType.JD_ANALYSIS} else "followup_brief")),
                 decision.reasoning[:100],
             )
             return {
@@ -319,7 +330,7 @@ def _classify_task(state: AgentState, *, web_search_available: bool) -> dict[str
                 "task_type": decision.task_type.value,
                 "planning_reason": decision.reasoning,
                 "question_signature": f"{decision.task_type.value}:llm",
-                "response_mode": "direct_answer" if decision.task_type == TaskType.QA else ("full_report" if decision.task_type in {TaskType.RESUME_ANALYSIS, TaskType.JD_ANALYSIS} else "followup_brief"),
+                "response_mode": "direct_answer" if decision.task_type == TaskType.QA else ("summary_report" if decision.task_type == TaskType.SUMMARY_ASSESSMENT else ("full_report" if decision.task_type in {TaskType.RESUME_ANALYSIS, TaskType.JD_ANALYSIS} else "followup_brief")),
             }
         except Exception as e:
             last_error = e
@@ -395,6 +406,8 @@ def supervisor_plan_node(state: AgentState, *, web_search_available: bool = Fals
         execution_plan = ["resume_expert", "respond"]
     elif task_type in {"interview_simulation", "interview_followup"}:
         execution_plan = ["interview_expert", "respond"]
+    elif task_type == "summary_assessment":
+        execution_plan = ["summary_expert", "respond"]
     elif task_type == "react_fallback":
         execution_plan = ["react_fallback", "respond"]
     else:
@@ -448,6 +461,7 @@ def supervisor_plan_node(state: AgentState, *, web_search_available: bool = Fals
         "react_iterations": int(state.get("react_iterations", 0) or 0),
         "resume_data": resume_data if resume_data else ({"raw_text": question} if task_type in {"resume_analysis", "resume_followup", "match_followup"} and question else None),
         "jd_data": jd_data if jd_data else ({"raw_text": question} if task_type in {"jd_analysis", "jd_followup"} and question else None),
+        "summary_data": state.get("summary_data"),
     }
 
 
@@ -466,7 +480,7 @@ def supervisor_review_node(state: AgentState) -> dict:
     agent_outputs = dict(state.get("agent_outputs", {}) or {})
     handoff_agent = _normalize_agent_name(state.get("react_handoff_agent"))
 
-    if active_agent in {"qa_flow", "jd_expert", "resume_expert", "interview_expert", "react_fallback"}:
+    if active_agent in {"qa_flow", "jd_expert", "resume_expert", "interview_expert", "summary_expert", "react_fallback"}:
         summary_payload: dict[str, Any] = {
             "summary": final_answer[:500],
             "final_answer": final_answer,
@@ -479,6 +493,11 @@ def supervisor_review_node(state: AgentState) -> dict:
             summary_payload["resume_data"] = state.get("resume_data")
             summary_payload["jd_data"] = state.get("jd_data")
         elif active_agent == "interview_expert":
+            summary_payload["interview_data"] = state.get("interview_data")
+            summary_payload["jd_data"] = state.get("jd_data")
+            summary_payload["resume_data"] = state.get("resume_data")
+        elif active_agent == "summary_expert":
+            summary_payload["summary_data"] = state.get("summary_data")
             summary_payload["interview_data"] = state.get("interview_data")
             summary_payload["jd_data"] = state.get("jd_data")
             summary_payload["resume_data"] = state.get("resume_data")
@@ -526,7 +545,7 @@ def generate_final_node(state: AgentState) -> dict:
     """
     final_answer = state.get("final_answer", "")
     agent_outputs = state.get("agent_outputs", {}) or {}
-    execution_plan = [name for name in state.get("execution_plan", []) if name in {"qa_flow", "jd_expert", "resume_expert", "interview_expert", "react_fallback"}]
+    execution_plan = [name for name in state.get("execution_plan", []) if name in {"qa_flow", "jd_expert", "resume_expert", "interview_expert", "summary_expert", "react_fallback"}]
 
     if len(execution_plan) <= 1:
         if final_answer:
@@ -558,6 +577,7 @@ def generate_final_node(state: AgentState) -> dict:
             "jd_expert": "JD 专家",
             "resume_expert": "简历专家",
             "interview_expert": "面试专家",
+            "summary_expert": "总结专家",
             "react_fallback": "ReAct 兜底",
         }.get(agent_name, agent_name)
         expert_blocks.append(f"## {label}\n{answer}")

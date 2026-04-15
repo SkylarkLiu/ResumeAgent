@@ -24,6 +24,7 @@ class TaskType(str, Enum):
     QA = "qa"
     RESUME_ANALYSIS = "resume_analysis"
     JD_ANALYSIS = "jd_analysis"
+    SUMMARY_ASSESSMENT = "summary_assessment"
     INTERVIEW_SIMULATION = "interview_simulation"
     INTERVIEW_FOLLOWUP = "interview_followup"
     JD_FOLLOWUP = "jd_followup"
@@ -60,7 +61,7 @@ class AgentState(TypedDict, total=False):
 
     # ---- 路由决策（存储字符串值，避免 msgpack 序列化问题）----
     route_type: str  # "retrieve" | "web" | "direct"
-    task_type: str   # "qa" | "resume_analysis" | "jd_analysis" | "jd_followup" | "resume_followup" | "match_followup" | "react_fallback"
+    task_type: str   # "qa" | "resume_analysis" | "jd_analysis" | "summary_assessment" | "jd_followup" | "resume_followup" | "match_followup" | "react_fallback"
     question_signature: str
     planning_reason: str
     response_mode: str  # "full_report" | "followup_brief" | "match_brief" | "direct_answer"
@@ -89,6 +90,7 @@ class AgentState(TypedDict, total=False):
     # 提取后: {"position", "company", "skills_must", "tech_stack", "summary", ...}
     jd_data: dict | None
     interview_data: dict | None
+    summary_data: dict | None
 
     # ---- 分层裁剪：对话摘要 ----
     # 早期消息的压缩摘要文本（由 generate 节点维护，持久化到 checkpointer）

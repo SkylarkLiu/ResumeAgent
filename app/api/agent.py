@@ -22,7 +22,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agent import get_jd_analysis_subgraph, get_resume_analysis_subgraph
+from app.agent import get_jd_analysis_flow, get_resume_analysis_flow
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.schemas.agent import (
@@ -138,6 +138,7 @@ def _normalize_session_messages(
     messages: list[Any],
     task_type: str = "",
     route_type: str = "",
+    summary_data: dict[str, Any] | None = None,
 ) -> list[SessionMessageItem]:
     """将 checkpoint 中的原始消息归一化为稳定可展示的 user/assistant turn。"""
     normalized: list[SessionMessageItem] = []
@@ -171,12 +172,19 @@ def _normalize_session_messages(
             normalized[-1].route_type = route_type
             continue
 
+        attach_summary = (
+            role == "assistant"
+            and bool(summary_data)
+            and ("综合评估报告" in text or "能力雷达概览" in text or task_type == "summary_assessment")
+        )
+
         normalized.append(
             SessionMessageItem(
                 role=role,
                 content=text,
                 task_type=task_type if role == "assistant" else "",
                 route_type=route_type if role == "assistant" else "",
+                summary_data=(summary_data or {}) if attach_summary else {},
             )
         )
 
@@ -200,6 +208,7 @@ def _build_chat_turn_input_state(question: str, session_id: str, session_values:
         "context_sources": session_values.get("context_sources", []),
         "working_context": session_values.get("working_context", ""),
         "interview_data": session_values.get("interview_data"),
+        "summary_data": session_values.get("summary_data"),
         "conversation_summary": session_values.get("conversation_summary", ""),
         "final_answer": "",
         "execution_plan": [],
@@ -237,7 +246,7 @@ async def _persist_analysis_state(
     ai_messages: list | None = None,
     extra_state: dict[str, Any] | None = None,
 ) -> None:
-    """把分析子图结果写回主图 checkpointer，保留消息和结构化数据。"""
+    """把分析流程结果写回主图 checkpointer，保留消息和结构化数据。"""
     if _agent_graph is None:
         return
 
@@ -274,7 +283,7 @@ async def _resume_stream_event_generator(
     """
     简历分析流式事件生成器。
 
-    通过简历分析子图执行：extract_resume → resolve_jd_context → generate_analysis
+    通过简历分析流程执行：extract_resume → resolve_jd_context → generate_analysis
 
     SSE 事件格式：
     - data: {"type": "extracted", "resume_data": {...}}   - 简历提取完成
@@ -284,9 +293,9 @@ async def _resume_stream_event_generator(
     - data: {"type": "error", "message": "..."}            - 错误
     """
     try:
-        subgraph = get_resume_analysis_subgraph()
-        if subgraph is None:
-            yield _sse_event({"type": "error", "message": "简历分析子图未初始化，请检查服务启动日志。"})
+        analysis_flow = get_resume_analysis_flow()
+        if analysis_flow is None:
+            yield _sse_event({"type": "error", "message": "简历分析流程未初始化，请检查服务启动日志。"})
             return
 
         config = {"configurable": {"thread_id": session_id}}
@@ -309,7 +318,7 @@ async def _resume_stream_event_generator(
         ai_messages = None
         error_emitted = False
 
-        async for mode, payload in subgraph.astream(
+        async for mode, payload in analysis_flow.astream(
             input_state,
             config=config,
             stream_mode=["custom", "updates"],
@@ -536,6 +545,11 @@ async def agent_chat_stream(request: AgentChatRequest):
                             "current_score": payload.get("current_score", 0),
                             "average_score": payload.get("average_score", 0),
                         })
+                    elif event_type == "summary_data":
+                        yield _sse_event({
+                            "type": "summary_data",
+                            "summary_data": payload.get("summary_data", {}),
+                        })
                     elif event_type == "sources":
                         sources_api = _build_sources(payload.get("sources", []))
                         yield _sse_event({"type": "sources", "sources": [s.model_dump() for s in sources_api]})
@@ -575,6 +589,8 @@ async def agent_chat_stream(request: AgentChatRequest):
                         final_answer = payload["jd_expert"].get("final_answer", final_answer)
                     if "interview_expert" in payload:
                         final_answer = payload["interview_expert"].get("final_answer", final_answer)
+                    if "summary_expert" in payload:
+                        final_answer = payload["summary_expert"].get("final_answer", final_answer)
                     if "react_fallback" in payload:
                         final_answer = payload["react_fallback"].get("final_answer", final_answer)
                     if "generate_final" in payload:
@@ -759,7 +775,7 @@ async def _jd_stream_event_generator(
     """
     JD 分析流式事件生成器。
 
-    通过 JD 分析子图执行：extract_jd → analyze_jd
+    通过 JD 分析流程执行：extract_jd → analyze_jd
 
     SSE 事件格式：
     - data: {"type": "extracted", "jd_data": {...}}       - JD 提取完成
@@ -768,9 +784,9 @@ async def _jd_stream_event_generator(
     - data: {"type": "error", "message": "..."}
     """
     try:
-        subgraph = get_jd_analysis_subgraph()
-        if subgraph is None:
-            yield _sse_event({"type": "error", "message": "JD 分析子图未初始化，请检查服务启动日志。"})
+        analysis_flow = get_jd_analysis_flow()
+        if analysis_flow is None:
+            yield _sse_event({"type": "error", "message": "JD 分析流程未初始化，请检查服务启动日志。"})
             return
 
         config = {"configurable": {"thread_id": session_id}}
@@ -791,7 +807,7 @@ async def _jd_stream_event_generator(
         ai_messages = None
         error_emitted = False
 
-        async for mode, payload in subgraph.astream(
+        async for mode, payload in analysis_flow.astream(
             input_state,
             config=config,
             stream_mode=["custom", "updates"],
@@ -1014,6 +1030,7 @@ async def list_sessions(limit: int = 50, offset: int = 0):
                     messages,
                     task_type=str(values.get("task_type", "")),
                     route_type=str(values.get("route_type", "")),
+                    summary_data=values.get("summary_data"),
                 )
                 title = _build_session_title(messages)
                 last_preview = _truncate_preview(
@@ -1029,6 +1046,7 @@ async def list_sessions(limit: int = 50, offset: int = 0):
                     last_message_preview=last_preview,
                     has_resume_data=bool(values.get("resume_data")),
                     has_jd_data=bool(values.get("jd_data")),
+                    has_summary_data=bool(values.get("summary_data")),
                     task_type=str(values.get("task_type", "")),
                     updated_at=updated_at,
                 ))
@@ -1112,6 +1130,7 @@ async def list_sessions(limit: int = 50, offset: int = 0):
                                         messages,
                                         task_type=str(values.get("task_type", "")),
                                         route_type=str(values.get("route_type", "")),
+                                        summary_data=values.get("summary_data"),
                                     )
                                     last_preview = _truncate_preview(
                                         normalized_messages[-1].content if normalized_messages else "",
@@ -1127,6 +1146,7 @@ async def list_sessions(limit: int = 50, offset: int = 0):
                                         last_message_preview=last_preview,
                                         has_resume_data=bool(values.get("resume_data")),
                                         has_jd_data=bool(values.get("jd_data")),
+                                        has_summary_data=bool(values.get("summary_data")),
                                         task_type=str(values.get("task_type", "")),
                                         updated_at=updated_at,
                                     ))
@@ -1181,8 +1201,12 @@ async def get_session_messages(session_id: str):
         messages = values.get("messages", [])
         task_type = str(values.get("task_type", ""))
         route_type = str(values.get("route_type", ""))
-        result_messages = _normalize_session_messages(messages, task_type=task_type, route_type=route_type)
-
+        result_messages = _normalize_session_messages(
+            messages,
+            task_type=task_type,
+            route_type=route_type,
+            summary_data=values.get("summary_data"),
+        )
         return SessionMessagesResponse(session_id=session_id, messages=result_messages)
 
     except Exception as e:

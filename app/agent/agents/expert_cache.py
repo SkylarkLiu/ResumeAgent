@@ -8,6 +8,8 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from langchain_core.messages import HumanMessage
+
 
 def _stable_hash(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
@@ -41,6 +43,22 @@ def _trim_jd_payload(jd_data: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _latest_user_question(state: dict[str, Any]) -> str:
+    """从 state.messages 中提取最新用户问题文本（用于缓存键去重）。"""
+    messages = state.get("messages") or []
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage) and isinstance(msg.content, str) and msg.content.strip():
+            return msg.content.strip()
+    return ""
+
+
+def _question_hash(question: str) -> str:
+    """对用户问题文本做短 hash，避免超长问题撑大缓存键 payload。"""
+    if not question:
+        return ""
+    return hashlib.sha256(question.encode("utf-8")).hexdigest()[:16]
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -60,10 +78,12 @@ def _build_cache_meta(state: dict[str, Any], expert_name: str, cache_key: str) -
 
 def build_resume_expert_cache_key(state: dict[str, Any]) -> str:
     task_type = str(state.get("task_type", ""))
+    question = _latest_user_question(state)
     payload = {
         "task_type": task_type,
         "question_signature": str(state.get("question_signature", "")),
         "response_mode": str(state.get("response_mode", "")),
+        "question_hash": _question_hash(question),
         "resume_data": _trim_resume_payload(state.get("resume_data")),
         "jd_data": _trim_jd_payload(state.get("jd_data")),
     }
@@ -72,12 +92,44 @@ def build_resume_expert_cache_key(state: dict[str, Any]) -> str:
 
 def build_jd_expert_cache_key(state: dict[str, Any]) -> str:
     task_type = str(state.get("task_type", ""))
+    question = _latest_user_question(state)
     payload = {
         "task_type": task_type,
         "question_signature": str(state.get("question_signature", "")),
         "response_mode": str(state.get("response_mode", "")),
+        "question_hash": _question_hash(question),
         "jd_data": _trim_jd_payload(state.get("jd_data")),
         "resume_data": _trim_resume_payload(state.get("resume_data")),
+    }
+    return _stable_hash(payload)
+
+
+def build_summary_expert_cache_key(state: dict[str, Any]) -> str:
+    task_type = str(state.get("task_type", ""))
+    question = _latest_user_question(state)
+    interview_data = dict(state.get("interview_data") or {})
+    interview_history = list(interview_data.get("history") or [])
+    trimmed_interview = [
+        {
+            "question": item.get("question", ""),
+            "score": item.get("score", 0),
+            "verdict": item.get("verdict", ""),
+        }
+        for item in interview_history[-5:]
+    ]
+    payload = {
+        "task_type": task_type,
+        "question_signature": str(state.get("question_signature", "")),
+        "response_mode": str(state.get("response_mode", "")),
+        "question_hash": _question_hash(question),
+        "jd_data": _trim_jd_payload(state.get("jd_data")),
+        "resume_data": _trim_resume_payload(state.get("resume_data")),
+        "interview_data": {
+            "active": bool(interview_data.get("active")),
+            "current_question": interview_data.get("current_question", ""),
+            "total_questions": interview_data.get("total_questions", 0),
+            "history": trimmed_interview,
+        },
     }
     return _stable_hash(payload)
 
@@ -99,4 +151,15 @@ def build_jd_expert_cache_entry(state: dict[str, Any], result: dict[str, Any], *
         "jd_data": result.get("jd_data"),
         "resume_data": state.get("resume_data"),
         "_meta": _build_cache_meta(state, "jd_expert", cache_key),
+    }
+
+
+def build_summary_expert_cache_entry(state: dict[str, Any], result: dict[str, Any], *, cache_key: str) -> dict[str, Any]:
+    return {
+        "final_answer": result.get("final_answer", ""),
+        "summary_data": result.get("summary_data"),
+        "jd_data": state.get("jd_data"),
+        "resume_data": state.get("resume_data"),
+        "interview_data": state.get("interview_data"),
+        "_meta": _build_cache_meta(state, "summary_expert", cache_key),
     }

@@ -1,5 +1,8 @@
 """
-简历分析子图。
+简历分析流程。
+
+由 app/agent/subgraphs/resume_analysis.py 迁移而来，
+节点名、事件格式、函数签名保持不变，仅调整模块位置与 logger 命名。
 """
 from __future__ import annotations
 
@@ -17,11 +20,11 @@ from app.agent.nodes.generate_analysis import generate_analysis_stream
 from app.agent.nodes.retrieve_jd import retrieve_jd
 from app.core.logger import setup_logger
 
-logger = setup_logger("agent.subgraphs.resume_analysis")
+logger = setup_logger("agent.resume_flow")
 
 
 class ResumeAnalysisState(TypedDict, total=False):
-    """简历分析子图关心的状态字段。"""
+    """简历分析流程关心的状态字段。"""
 
     messages: Annotated[list[BaseMessage], add_messages]
     context_sources: list[dict]
@@ -32,7 +35,7 @@ class ResumeAnalysisState(TypedDict, total=False):
 
 
 def _emit_custom_event(payload: dict[str, Any]) -> None:
-    """在 stream_mode=custom 下发送子图事件。"""
+    """在 stream_mode=custom 下发送流程事件。"""
     try:
         writer = get_stream_writer()
     except RuntimeError:
@@ -105,7 +108,7 @@ async def _stream_generate_analysis_node(state: ResumeAnalysisState) -> dict:
             raise RuntimeError(message)
 
     if final_result is None:
-        logger.warning("简历分析子图未收到 done 事件，返回兜底结果")
+        logger.warning("简历分析流程未收到 done 事件，返回兜底结果")
         final_result = {
             "final_answer": "❌ 简历分析未生成结果",
             "messages": [AIMessage(content="简历分析未生成结果")],
@@ -113,8 +116,8 @@ async def _stream_generate_analysis_node(state: ResumeAnalysisState) -> dict:
     return final_result
 
 
-def build_resume_analysis_subgraph():
-    """构建简历分析子图。"""
+def build_resume_analysis_flow():
+    """构建简历分析流程。"""
     builder = StateGraph(ResumeAnalysisState)
     builder.add_node("extract_resume", _extract_resume_node)
     builder.add_node("resolve_jd_context", _resolve_jd_context_node)
@@ -125,3 +128,7 @@ def build_resume_analysis_subgraph():
     builder.add_edge("resolve_jd_context", "generate_analysis")
     builder.add_edge("generate_analysis", END)
     return builder.compile()
+
+
+# ── 兼容旧调用方 ──
+build_resume_analysis_subgraph = build_resume_analysis_flow

@@ -81,16 +81,20 @@ def log_cache_access(
     )
 
 
-def log_subgraph_skip(
+def log_flow_skip(
     *,
     node_name: str,
     reason: str,
     thread_id: str = "",
 ) -> None:
-    """打印子图节点跳过（去重执行）日志。"""
+    """打印分析流程节点跳过（去重执行）日志。"""
     _obs_logger.info(
-        "SUBGRAPH_SKIP | node=%s | reason=%s | thread=%s",
+        "FLOW_SKIP | node=%s | reason=%s | thread=%s",
         node_name,
         reason,
         thread_id,
     )
+
+
+# 兼容旧调用方
+log_subgraph_skip = log_flow_skip
