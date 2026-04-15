@@ -9,10 +9,12 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agent.agents import (
     build_jd_expert_node,
+    build_summary_expert_node,
     interview_expert_node,
     build_qa_flow_subgraph,
     build_react_fallback_node,
     build_resume_expert_node,
+    summary_expert_node,
     generate_final_node,
     supervisor_plan_node,
     supervisor_plan_route,
@@ -26,14 +28,15 @@ from app.agent.nodes.normalize import set_max_chars
 from app.agent.nodes.retrieve_jd import set_retrieval_service_jd
 from app.agent.nodes.web_search import set_web_search_service
 from app.agent.state import AgentState
-from app.agent.subgraphs import build_jd_analysis_subgraph, build_resume_analysis_subgraph
+from app.agent.agents.jd_flow import build_jd_analysis_flow
+from app.agent.agents.resume_flow import build_resume_analysis_flow
 from app.core.logger import setup_logger
 
 logger = setup_logger("agent.graph")
 
 _qa_flow_subgraph = None
-_resume_analysis_subgraph = None
-_jd_analysis_subgraph = None
+_resume_analysis_flow = None
+_jd_analysis_flow = None
 
 
 def get_qa_flow_subgraph():
@@ -41,14 +44,19 @@ def get_qa_flow_subgraph():
     return _qa_flow_subgraph
 
 
-def get_resume_analysis_subgraph():
-    """获取已编译的简历分析子图。"""
-    return _resume_analysis_subgraph
+def get_resume_analysis_flow():
+    """获取已编译的简历分析流程。"""
+    return _resume_analysis_flow
 
 
-def get_jd_analysis_subgraph():
-    """获取已编译的 JD 分析子图。"""
-    return _jd_analysis_subgraph
+def get_jd_analysis_flow():
+    """获取已编译的 JD 分析流程。"""
+    return _jd_analysis_flow
+
+
+# ── 兼容旧调用方 ──
+get_resume_analysis_subgraph = get_resume_analysis_flow
+get_jd_analysis_subgraph = get_jd_analysis_flow
 
 
 def build_agent_graph(
@@ -86,10 +94,10 @@ def build_agent_graph(
     )
     set_max_chars(settings.web_search_result_max_chars)
 
-    global _qa_flow_subgraph, _resume_analysis_subgraph, _jd_analysis_subgraph
+    global _qa_flow_subgraph, _resume_analysis_flow, _jd_analysis_flow
 
-    _resume_analysis_subgraph = build_resume_analysis_subgraph()
-    _jd_analysis_subgraph = build_jd_analysis_subgraph()
+    _resume_analysis_flow = build_resume_analysis_flow()
+    _jd_analysis_flow = build_jd_analysis_flow()
     _qa_flow_subgraph = build_qa_flow_subgraph()
 
     # ---- 构建图 ----
@@ -101,9 +109,10 @@ def build_agent_graph(
         lambda state: supervisor_plan_node(state, web_search_available=web_search_service.is_available),
     )
     builder.add_node("qa_flow", _qa_flow_subgraph)
-    builder.add_node("jd_expert", build_jd_expert_node(_jd_analysis_subgraph))
-    builder.add_node("resume_expert", build_resume_expert_node(_resume_analysis_subgraph))
+    builder.add_node("jd_expert", build_jd_expert_node(_jd_analysis_flow))
+    builder.add_node("resume_expert", build_resume_expert_node(_resume_analysis_flow))
     builder.add_node("interview_expert", interview_expert_node)
+    builder.add_node("summary_expert", build_summary_expert_node(summary_expert_node))
     builder.add_node("react_fallback", build_react_fallback_node(retrieval_service, web_search_service))
     builder.add_node("supervisor_review", supervisor_review_node)
     builder.add_node("generate_final", generate_final_node)
@@ -118,6 +127,7 @@ def build_agent_graph(
             "jd_expert": "jd_expert",
             "resume_expert": "resume_expert",
             "interview_expert": "interview_expert",
+            "summary_expert": "summary_expert",
             "react_fallback": "react_fallback",
             "respond": "generate_final",
         },
@@ -127,6 +137,7 @@ def build_agent_graph(
     builder.add_edge("jd_expert", "supervisor_review")
     builder.add_edge("resume_expert", "supervisor_review")
     builder.add_edge("interview_expert", "supervisor_review")
+    builder.add_edge("summary_expert", "supervisor_review")
     builder.add_edge("react_fallback", "supervisor_review")
 
     builder.add_conditional_edges(
@@ -143,7 +154,7 @@ def build_agent_graph(
     checkpointer = get_checkpointer()
     graph = builder.compile(checkpointer=checkpointer)
     logger.info(
-        "Agent 主图编译完成 (checkpointer=%s, V1 supervisor=%s, qa/resume/jd 子流程已启用)",
+        "Agent 主图编译完成 (checkpointer=%s, V1 supervisor=%s, qa/resume/jd 分析流程已启用)",
         type(checkpointer).__name__,
         True,
     )

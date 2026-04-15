@@ -1,6 +1,19 @@
 # ResumeAgent - 智能简历优化与模拟面试助手
 
-> 基于 **LangGraph** + **智谱 GLM-4V** + **FAISS** 的多智能体问答系统，聚焦简历优化、岗位分析与模拟面试。
+> 基于 **LangGraph 多智能体编排**构建的求职智能体平台，围绕简历分析优化、岗位 JD 解读、简历-JD 匹配评估、模拟面试等场景，打造集**语义路由分发、RAG 检索增强、多模态文档解析、全链路流式输出、受控 ReAct 兜底**于一体的对话式智能体系统，实现从"单轮工具调用"向"多轮有状态对话智能体"的架构升级。
+
+**技术栈：** Python、FastAPI、LangChain、LangGraph、FAISS、PostgreSQL、Docker、SSE、RAG
+
+## 项目亮点
+
+- **Supervisor + Expert 多智能体编排**：基于 LangGraph StateGraph 构建 `意图识别 → 专家分发 → 结果审查 → 循环控制` 的有向图执行引擎，覆盖 QA、简历分析、JD 分析、模拟面试、综合评估五条主路径；受控 ReAct fallback 层处理非标准组合请求，支持工具白名单约束、tool-cache 与 handoff 回切标准 Expert，避免纯 ReAct 的路径不可控与高 token 消耗
+- **RAG 检索与智能降级**：`KB 语义检索 → 相关性评估 → 自动降级 Web Search` 的自适应检索链路；多查询 JD 召回策略（岗位+技能组合/技能子集/语义补充三层查询）与全局去重排序，KB 检索质量低于阈值时自动降级，确保回答质量不因知识库覆盖不足而退化
+- **全链路 SSE 流式输出**：所有分析路径统一为 SSE 事件流，`extracted → sources → token* → done/error` 分阶段事件协议，前端可感知每个执行节点状态；`asyncio.to_thread()` 桥接同步阻塞调用，解决事件循环阻塞 83s+ 的生产问题
+- **分层上下文裁剪**：`System Prompt 保留 + 早期消息规则化压缩为摘要 + 最近 N 条完整保留` 三层策略，摘要跨轮次累积注入 system prompt，长对话上下文丢失从"前 N 轮完全丢失"降级为"以摘要形式保留"，token 开销降低约 60%
+- **多级缓存体系**：Expert 级结果缓存（task_type + question_signature + question_hash 复合键）与 ReAct tool-cache 两层缓存，追问场景响应效率显著提升
+- **模拟面试有状态闭环**：LangGraph Checkpointer 跨轮次持久化，`出题 → 用户回答 → 实时评分 → 逐题反馈 → 下一题 → 总结复盘` 完整状态机，支持语音输入与面试进度追踪
+- **多模态文档解析**：文件类型路由器自动分发 PDF/图片/文本，PyMuPDF 提取文本，GLM-4V 视觉模型实现图片简历 OCR + 语义理解
+- **PostgreSQL 双层持久化**：AsyncPostgresSaver 持久化 checkpoint + 知识库元数据/Expert 缓存独立存储，Docker 部署下容器重启数据零丢失
 
 ## 架构
 
@@ -170,12 +183,12 @@ ResumeAgent/
 │   │   │   ├── interview_expert.py#     模拟面试 Expert（出题→回答→评分→总结）
 │   │   │   ├── expert_cache.py    #     Expert 缓存逻辑
 │   │   │   ├── cache_store.py     #     缓存存储后端（State/PostgreSQL）
-│   │   │   ├── qa_flow.py         #     QA 子图（KB → 评估 → 降级 → 生成）
+│   │   │   ├── qa_flow.py         #     QA 流程（KB → 评估 → 降级 → 生成）
+│   │   │   ├── resume_flow.py     #     简历分析流程
+│   │   │   ├── jd_flow.py         #     JD 分析流程
+│   │   │   ├── summary_expert.py  #     综合评估 Expert
 │   │   │   ├── react_fallback.py  #     非标准请求兜底（受控 ReAct）
 │   │   │   └── react_tools.py     #     ReAct 工具 registry / schema / cache key
-│   │   ├── subgraphs/             #   分析子图定义
-│   │   │   ├── resume_analysis.py
-│   │   │   └── jd_analysis.py
 │   │   ├── utils/                 #   工具函数
 │   │   │   ├── __init__.py
 │   │   │   └── history_utils.py   #     分层裁剪（token 估算 / 摘要压缩 / 分层构建）
@@ -230,6 +243,7 @@ ResumeAgent/
 │   ├── test_basic_flows.py        #   基础流程测试（9个）
 │   ├── test_multi_step.py         #   多轮对话测试（3个）
 │   ├── test_cache_hit.py          #   缓存命中测试（4个）
+│   ├── test_expert_cache_key.py   #   缓存键测试（14个）
 │   ├── test_kb_fallback.py        #   KB 降级测试（14个）
 │   ├── test_persistence.py        #   持久化测试（9个）
 │   ├── test_layered_history.py    #   分层裁剪测试（32个）
@@ -636,6 +650,8 @@ FAISS 目录中保留：
 
 ## 最近改动
 
+- **ReAct Fallback**：受控 ReAct 兜底层处理非标准组合问题，支持 tool-cache、工具白名单、handoff 回切标准 Expert
+- **缓存键修复**：Expert 缓存键新增 question_hash 字段，修复不同追问在同一 question_signature 下错误命中缓存的碰撞 Bug
 - **模拟面试**：Interview Expert 完整闭环——自动出题、用户回答、实时评分、面试总结复盘，支持语音输入
 - **分层裁剪**：早期消息压缩为摘要注入 system prompt + 最近 N 条完整保留，上下文丢失从"前 N 轮完全丢失"变为"以摘要形式保留"，token 开销降低约 60%
 - **会话历史**：新增会话列表与消息记录查询接口，支持前端恢复历史对话

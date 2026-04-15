@@ -40,6 +40,7 @@ function showWelcome() {
             <li>🌐 询问实时信息（自动网络搜索）</li>
             <li>🎯 <strong>岗位分析</strong> — 上传或粘贴JD，获取技术要求解读+简历建议</li>
             <li>📋 <strong>简历分析</strong> — 上传或粘贴简历，获取专业评估报告</li>
+            <li>📊 <strong>综合评估</strong> — 结合 JD、简历与模拟面试结果生成雷达图和改进建议</li>
         </ul>
         <p style="margin-top:8px;font-size:12px;color:#999;">会话 ID: ${escapeHtml(sessionId)}</p>
     </div>`;
@@ -69,6 +70,7 @@ const btnNewSession = document.getElementById('btn-new-session');
 // 简历分析相关 DOM
 const btnResume = document.getElementById('btn-resume');
 const btnInterview = document.getElementById('btn-interview');
+const btnSummary = document.getElementById('btn-summary');
 const resumeModal = document.getElementById('resume-modal');
 const btnCloseResume = document.getElementById('btn-close-resume');
 const resumeTabs = document.querySelectorAll('.resume-tab');
@@ -89,6 +91,11 @@ const btnCloseInterview = document.getElementById('btn-close-interview');
 const interviewFocus = document.getElementById('interview-focus');
 const interviewCount = document.getElementById('interview-count');
 const btnStartInterview = document.getElementById('btn-start-interview');
+const summaryModal = document.getElementById('summary-modal');
+const btnCloseSummary = document.getElementById('btn-close-summary');
+const summaryFocus = document.getElementById('summary-focus');
+const summaryResourceFocus = document.getElementById('summary-resource-focus');
+const btnStartSummary = document.getElementById('btn-start-summary');
 
 // JD 分析相关 DOM
 const btnJd = document.getElementById('btn-jd');
@@ -113,6 +120,8 @@ let isProcessing = false;
 let speechRecognition = null;
 let isVoiceListening = false;
 let isInInterviewMode = false;  // 面试模式标记
+const summaryExportStore = new Map();
+let summaryExportCounter = 0;
 
 // --- 工具函数 ---
 function scrollToBottom() {
@@ -251,6 +260,7 @@ function appendMessage(role, content, sources = null, routeType = null, isMarkdo
                 direct: '💬 直接回答',
                 resume_analysis: '📋 简历分析',
                 jd_analysis: '🎯 岗位分析',
+                summary_assessment: '📊 综合评估',
                 interview_simulation: '🎤 模拟面试',
                 interview_followup: '🎤 面试追问'
             };
@@ -297,6 +307,227 @@ function buildSourcesHtml(sources) {
     return html;
 }
 
+function registerSummaryExport(summaryData) {
+    const exportId = `summary_${Date.now()}_${summaryExportCounter++}`;
+    summaryExportStore.set(exportId, JSON.parse(JSON.stringify(summaryData || {})));
+    return exportId;
+}
+
+function buildSummaryExportMarkdown(summaryData) {
+    const data = summaryData || {};
+    const radar = Array.isArray(data.radar) ? data.radar : [];
+    const advice = Array.isArray(data.advice) ? data.advice : [];
+    const resources = Array.isArray(data.resources) ? data.resources : [];
+    const nextSteps = Array.isArray(data.next_steps) ? data.next_steps : [];
+
+    return [
+        '# 综合评估报告',
+        '',
+        `- 生成时间：${new Date().toLocaleString('zh-CN')}`,
+        `- 总评分：${data.overall_score || 0}/100`,
+        '',
+        `## 总评`,
+        '',
+        `${data.final_verdict || '暂无总评'}`,
+        '',
+        '## 能力雷达',
+        '',
+        ...radar.map(item => `- ${item.label || item.key}：${item.score || 0}/100`),
+        '',
+        '## 雷达图解读',
+        '',
+        `${data.radar_summary || '暂无解读'}`,
+        '',
+        '## 核心优势',
+        '',
+        ...((data.strengths || []).map(item => `- ${item}`)),
+        '',
+        '## 关键短板',
+        '',
+        ...((data.weaknesses || []).map(item => `- ${item}`)),
+        '',
+        '## 改进建议',
+        '',
+        ...advice.map(item => `- **${item.title || '改进建议'}**（${buildPriorityLabel(item.priority)}）：${item.detail || ''}`),
+        '',
+        '## 推荐资源',
+        '',
+        ...resources.map(item => `- **${item.title || '推荐资源'}**（${item.type || 'article'} / ${buildPriorityLabel(item.priority)}）：${item.reason || ''}`),
+        '',
+        '## 下一步行动',
+        '',
+        ...nextSteps.map((item, idx) => `${idx + 1}. ${item}`),
+        '',
+    ].join('\n');
+}
+
+function exportSummaryMarkdown(summaryData) {
+    const markdown = buildSummaryExportMarkdown(summaryData);
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const ts = new Date().toISOString().slice(0, 10);
+    link.href = url;
+    link.download = `summary-report-${ts}.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+}
+
+function buildSummaryRadarSvg(summaryData) {
+    const radar = Array.isArray(summaryData?.radar) ? summaryData.radar : [];
+    if (radar.length === 0) return '';
+
+    const size = 240;
+    const center = size / 2;
+    const maxRadius = 82;
+    const angleStep = (Math.PI * 2) / radar.length;
+    const levels = [0.25, 0.5, 0.75, 1];
+
+    const polarPoint = (index, ratio, radiusScale = 1) => {
+        const angle = -Math.PI / 2 + angleStep * index;
+        const radius = maxRadius * ratio * radiusScale;
+        const x = center + Math.cos(angle) * radius;
+        const y = center + Math.sin(angle) * radius;
+        return `${x.toFixed(2)},${y.toFixed(2)}`;
+    };
+
+    const levelPolygons = levels.map(level => (
+        `<polygon points="${radar.map((_, idx) => polarPoint(idx, level)).join(' ')}" class="summary-radar-grid" />`
+    )).join('');
+
+    const axes = radar.map((_, idx) => {
+        const angle = -Math.PI / 2 + angleStep * idx;
+        const x = center + Math.cos(angle) * maxRadius;
+        const y = center + Math.sin(angle) * maxRadius;
+        return `<line x1="${center}" y1="${center}" x2="${x.toFixed(2)}" y2="${y.toFixed(2)}" class="summary-radar-axis" />`;
+    }).join('');
+
+    const dataPolygon = radar.map((item, idx) => {
+        const ratio = Math.max(0, Math.min(100, Number(item.score || 0))) / 100;
+        return polarPoint(idx, ratio);
+    }).join(' ');
+
+    const points = radar.map((item, idx) => {
+        const ratio = Math.max(0, Math.min(100, Number(item.score || 0))) / 100;
+        const angle = -Math.PI / 2 + angleStep * idx;
+        const radius = maxRadius * ratio;
+        const x = center + Math.cos(angle) * radius;
+        const y = center + Math.sin(angle) * radius;
+        return `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="3.5" class="summary-radar-point" />`;
+    }).join('');
+
+    const labels = radar.map((item, idx) => {
+        const angle = -Math.PI / 2 + angleStep * idx;
+        const labelRadius = maxRadius + 28;
+        const x = center + Math.cos(angle) * labelRadius;
+        const y = center + Math.sin(angle) * labelRadius;
+        return `<text x="${x.toFixed(2)}" y="${y.toFixed(2)}" class="summary-radar-label">${escapeHtml(item.label || '')}</text>`;
+    }).join('');
+
+    return `
+        <svg class="summary-radar-svg" viewBox="0 0 ${size} ${size}" role="img" aria-label="能力雷达图">
+            ${levelPolygons}
+            ${axes}
+            <polygon points="${dataPolygon}" class="summary-radar-fill" />
+            ${points}
+            ${labels}
+        </svg>
+    `;
+}
+
+function buildPriorityLabel(priority) {
+    const labels = {
+        high: '高优先级',
+        medium: '中优先级',
+        low: '低优先级'
+    };
+    return labels[priority] || priority || '中优先级';
+}
+
+function buildSummaryCardHtml(summaryData) {
+    if (!summaryData || !summaryData.dimension_scores) return '';
+    const exportId = registerSummaryExport(summaryData);
+
+    const overallScore = Number(summaryData.overall_score || 0);
+    const strengths = (summaryData.strengths || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+    const weaknesses = (summaryData.weaknesses || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+    const advice = (summaryData.advice || []).map(item => `
+        <li>
+            <strong>${escapeHtml(item.title || '改进建议')}</strong>
+            <span class="summary-priority ${escapeHtml(item.priority || 'medium')}">${escapeHtml(buildPriorityLabel(item.priority))}</span>
+            <div>${escapeHtml(item.detail || '')}</div>
+        </li>
+    `).join('');
+    const resources = (summaryData.resources || []).map(item => `
+        <li>
+            <strong>${escapeHtml(item.title || '推荐资源')}</strong>
+            <span class="summary-resource-type">${escapeHtml(item.type || 'article')}</span>
+            <div>${escapeHtml(item.reason || '')}</div>
+        </li>
+    `).join('');
+    const scoreChips = (summaryData.radar || []).map(item => `
+        <div class="summary-score-chip">
+            <span>${escapeHtml(item.label || '')}</span>
+            <strong>${escapeHtml(String(item.score || 0))}</strong>
+        </div>
+    `).join('');
+
+    return `
+        <section class="summary-card">
+            <div class="summary-card-header">
+                <div>
+                    <div class="summary-card-label">总结专家</div>
+                    <h3>综合能力评估</h3>
+                    <p>${escapeHtml(summaryData.final_verdict || '')}</p>
+                </div>
+                <div class="summary-header-actions">
+                    <button class="summary-export-btn" type="button" data-summary-id="${escapeHtml(exportId)}">⬇️ 导出报告</button>
+                    <div class="summary-overall-score">
+                        <span>总评分</span>
+                        <strong>${escapeHtml(String(overallScore))}</strong>
+                    </div>
+                </div>
+            </div>
+            <div class="summary-score-grid">${scoreChips}</div>
+            <div class="summary-radar-layout">
+                <div class="summary-radar-panel">
+                    ${buildSummaryRadarSvg(summaryData)}
+                </div>
+                <div class="summary-radar-summary">
+                    <h4>雷达图解读</h4>
+                    <p>${escapeHtml(summaryData.radar_summary || '已根据当前会话数据生成综合雷达图。')}</p>
+                    <h4>下一步行动</h4>
+                    <ol>
+                        ${(summaryData.next_steps || []).map(step => `<li>${escapeHtml(step)}</li>`).join('')}
+                    </ol>
+                </div>
+            </div>
+            <div class="summary-columns">
+                <div>
+                    <h4>核心优势</h4>
+                    <ul>${strengths || '<li>暂无</li>'}</ul>
+                </div>
+                <div>
+                    <h4>关键短板</h4>
+                    <ul>${weaknesses || '<li>暂无</li>'}</ul>
+                </div>
+            </div>
+            <div class="summary-columns">
+                <div>
+                    <h4>改进建议</h4>
+                    <ul class="summary-rich-list">${advice || '<li>暂无</li>'}</ul>
+                </div>
+                <div>
+                    <h4>推荐资源</h4>
+                    <ul class="summary-rich-list">${resources || '<li>暂无</li>'}</ul>
+                </div>
+            </div>
+        </section>
+    `;
+}
+
 function buildAgentTimelineHtml(agentSteps) {
     if (!agentSteps || agentSteps.length === 0) return '';
 
@@ -305,6 +536,7 @@ function buildAgentTimelineHtml(agentSteps) {
         jd_expert: 'JD 专家',
         resume_expert: '简历专家',
         interview_expert: '面试专家',
+        summary_expert: '总结专家',
         react_fallback: 'ReAct 兜底'
     };
 
@@ -329,6 +561,7 @@ function buildPlanningMetaHtml(planningMeta) {
         jd_followup: 'JD 追问',
         resume_followup: '简历追问',
         match_followup: '匹配追问',
+        summary_assessment: '综合评估',
         interview_simulation: '模拟面试',
         interview_followup: '面试追问',
         react_fallback: 'ReAct 兜底'
@@ -425,7 +658,7 @@ function buildObsTagsHtml(obsMeta) {
     return `<div class="obs-tags">${items}</div>`;
 }
 
-function renderAiMessageContent({ routeType, fullAnswer, currentSources, agentSteps, planningMeta, obsMeta }) {
+function renderAiMessageContent({ routeType, fullAnswer, currentSources, agentSteps, planningMeta, obsMeta, summaryData }) {
     const routeLabels = {
         kb: '📚 知识库',
         web: '🌐 网络',
@@ -435,6 +668,7 @@ function renderAiMessageContent({ routeType, fullAnswer, currentSources, agentSt
         jd_followup: '🎯 JD 追问',
         resume_followup: '📋 简历追问',
         match_followup: '🧩 匹配追问',
+        summary_assessment: '📊 综合评估',
         interview_simulation: '🎤 模拟面试',
         interview_followup: '🎤 面试追问',
         react_fallback: '🛠️ ReAct 兜底'
@@ -445,16 +679,17 @@ function renderAiMessageContent({ routeType, fullAnswer, currentSources, agentSt
     const obsHtml = buildObsTagsHtml(obsMeta);
     const timelineHtml = buildAgentTimelineHtml(agentSteps);
     const sourcesHtml = currentSources.length > 0 ? buildSourcesHtml(currentSources) : '';
+    const summaryHtml = summaryData ? buildSummaryCardHtml(summaryData) : '';
 
     if (!fullAnswer) {
-        return routeHtml + planningHtml + obsHtml + timelineHtml + sourcesHtml;
+        return routeHtml + planningHtml + obsHtml + timelineHtml + summaryHtml + sourcesHtml;
     }
 
     try {
-        return routeHtml + planningHtml + obsHtml + timelineHtml + renderMarkdown(fullAnswer) + sourcesHtml;
+        return routeHtml + planningHtml + obsHtml + timelineHtml + summaryHtml + renderMarkdown(fullAnswer) + sourcesHtml;
     } catch (renderErr) {
         console.warn('Markdown 渲染异常，降级为纯文本:', renderErr);
-        return routeHtml + planningHtml + obsHtml + timelineHtml + '<p>' + escapeHtml(fullAnswer) + '</p>' + sourcesHtml;
+        return routeHtml + planningHtml + obsHtml + timelineHtml + summaryHtml + '<p>' + escapeHtml(fullAnswer) + '</p>' + sourcesHtml;
     }
 }
 
@@ -495,6 +730,7 @@ async function sendChat(question) {
         let agentSteps = [];
         let planningMeta = { task: '', questionSignature: '', responseMode: '' };
         let obsMeta = [];  // 可观测性标签
+        let currentSummaryData = null;
         let msgDiv = null;
 
         while (true) {
@@ -526,6 +762,7 @@ async function sendChat(question) {
                             agentSteps,
                             planningMeta,
                             obsMeta,
+                            summaryData: currentSummaryData,
                         });
                         setStatus('生成中', 'processing');
 
@@ -556,6 +793,7 @@ async function sendChat(question) {
                             agentSteps,
                             planningMeta,
                             obsMeta,
+                            summaryData: currentSummaryData,
                         });
                         setStatus('规划中', 'processing');
 
@@ -567,6 +805,7 @@ async function sendChat(question) {
                             jd_expert: '正在分析岗位描述',
                             resume_expert: '正在评估简历',
                             interview_expert: '正在进行模拟面试',
+                            summary_expert: '正在生成综合评估',
                             react_fallback: '正在组合工具处理非标准请求'
                         };
                         setStatus(statusLabels[payload.agent] || '处理中', 'processing');
@@ -579,6 +818,7 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
                             });
                         }
 
@@ -595,6 +835,7 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
                             });
                         }
 
@@ -611,6 +852,7 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
                             });
                         }
 
@@ -629,6 +871,7 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
                             });
                         }
 
@@ -646,6 +889,7 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
                             });
                         }
 
@@ -668,6 +912,7 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
                             });
                         }
 
@@ -738,6 +983,26 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
+                            });
+                        }
+
+                    } else if (payload.type === 'summary_data') {
+                        currentSummaryData = payload.summary_data || null;
+                        if (!msgDiv) {
+                            removeTypingIndicator();
+                            msgDiv = appendMessage('ai', '', [], currentRoute, true);
+                        }
+                        if (msgDiv) {
+                            const contentEl = msgDiv.querySelector('.message-content');
+                            contentEl.innerHTML = renderAiMessageContent({
+                                routeType: currentRoute,
+                                fullAnswer,
+                                currentSources,
+                                agentSteps,
+                                planningMeta,
+                                obsMeta,
+                                summaryData: currentSummaryData,
                             });
                         }
 
@@ -754,6 +1019,7 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
                             });
                         }
 
@@ -769,6 +1035,7 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
                             });
                             scrollToBottom();
                         }
@@ -785,6 +1052,7 @@ async function sendChat(question) {
                                 agentSteps,
                                 planningMeta,
                                 obsMeta,
+                                summaryData: currentSummaryData,
                             });
                         }
                         if (payload.session_id && payload.session_id !== sessionId) {
@@ -1133,6 +1401,7 @@ async function loadSessionList() {
                 const dataBadges = [];
                 if (session.has_resume_data) dataBadges.push('<span class="session-badge resume">简历</span>');
                 if (session.has_jd_data) dataBadges.push('<span class="session-badge jd">JD</span>');
+                if (session.has_summary_data) dataBadges.push('<span class="session-badge summary">总评</span>');
 
                 div.innerHTML = `
                     <div class="session-main">
@@ -1193,7 +1462,17 @@ async function switchToSession(targetSessionId) {
                     appendMessage('user', msg.content);
                 } else if (msg.role === 'assistant') {
                     const routeType = msg.route_type || msg.task_type || null;
-                    appendMessage('ai', msg.content, [], routeType, true);
+                    const msgDiv = appendMessage('ai', '', [], routeType, true);
+                    const contentEl = msgDiv.querySelector('.message-content');
+                    contentEl.innerHTML = renderAiMessageContent({
+                        routeType,
+                        fullAnswer: msg.content,
+                        currentSources: [],
+                        agentSteps: [],
+                        planningMeta: { task: msg.task_type || '', questionSignature: '', responseMode: '' },
+                        obsMeta: [],
+                        summaryData: msg.summary_data || null,
+                    });
                 }
             }
         } else {
@@ -1618,8 +1897,25 @@ function buildInterviewPrompt() {
     return prompt;
 }
 
+function buildSummaryPrompt() {
+    const focus = summaryFocus.value.trim();
+    const resourceFocus = summaryResourceFocus.value.trim();
+    let prompt = '请结合当前会话中的 JD 分析、简历分析和模拟面试记录，生成一份综合评估报告，给出总评分、能力雷达图、改进建议和推荐资源。';
+    if (focus) {
+        prompt += ` 评估重点：${focus}。`;
+    }
+    if (resourceFocus) {
+        prompt += ` 推荐资源请优先覆盖：${resourceFocus}。`;
+    }
+    return prompt;
+}
+
 function closeInterviewModal() {
     interviewModal.classList.add('hidden');
+}
+
+function closeSummaryModal() {
+    summaryModal.classList.add('hidden');
 }
 
 function initVoiceInput() {
@@ -1675,6 +1971,19 @@ function initVoiceInput() {
 
 clearImageBtn.addEventListener('click', clearImagePreview);
 
+chatMessages.addEventListener('click', (event) => {
+    const target = event.target.closest('.summary-export-btn');
+    if (!target) return;
+    const summaryId = target.dataset.summaryId || '';
+    const summaryData = summaryExportStore.get(summaryId);
+    if (!summaryData) {
+        setStatus('导出失败：未找到综合评估数据', 'error');
+        return;
+    }
+    exportSummaryMarkdown(summaryData);
+    setStatus('综合评估已导出', 'ready');
+});
+
 btnCloseModal.addEventListener('click', () => {
     uploadModal.classList.add('hidden');
 });
@@ -1688,7 +1997,12 @@ btnInterview.addEventListener('click', () => {
     interviewModal.classList.remove('hidden');
 });
 
+btnSummary.addEventListener('click', () => {
+    summaryModal.classList.remove('hidden');
+});
+
 btnCloseInterview.addEventListener('click', closeInterviewModal);
+btnCloseSummary.addEventListener('click', closeSummaryModal);
 
 btnStartInterview.addEventListener('click', () => {
     const prompt = buildInterviewPrompt();
@@ -1697,6 +2011,12 @@ btnStartInterview.addEventListener('click', () => {
     isInInterviewMode = true;
     messageInput.placeholder = '🎤 语音作答或输入答案…';
     messageInput.focus();
+    sendChat(prompt);
+});
+
+btnStartSummary.addEventListener('click', () => {
+    const prompt = buildSummaryPrompt();
+    closeSummaryModal();
     sendChat(prompt);
 });
 

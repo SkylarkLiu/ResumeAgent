@@ -30,6 +30,7 @@
                 <h1>智能简历优化与模拟面试助手</h1>
                 <div id="header-actions">
                     <button id="btn-interview" class="btn-header btn-interview" title="模拟面试">🎤 模拟面试</button>
+                    <button id="btn-summary" class="btn-header btn-summary" title="综合评估">📊 综合评估</button>
                     <button id="btn-jd" class="btn-header btn-jd" title="岗位JD分析">🎯 岗位分析</button>
                     <button id="btn-resume" class="btn-header btn-resume" title="简历分析">📋 简历分析</button>
                     <button id="btn-new-session" class="btn-header" title="新建会话">🔄 新建会话</button>
@@ -178,6 +179,22 @@
             </div>
             <p class="drop-hint" style="margin-top: 10px;">会自动结合当前会话中的 JD、简历和历史对话生成题目，并对你的作答逐题评分。</p>
             <button id="btn-start-interview" class="btn-primary btn-interview-primary">🚀 开始模拟面试</button>
+        </div>
+    </div>
+
+    <!-- 综合评估模态框 -->
+    <div id="summary-modal" class="modal hidden">
+        <div class="modal-content jd-modal-content">
+            <div class="jd-modal-header">
+                <h3>📊 综合评估</h3>
+                <button id="btn-close-summary" class="btn-modal-close">✕</button>
+            </div>
+            <div class="resume-options">
+                <input type="text" id="summary-focus" placeholder="评估重点（选填，如：面试通过率 / RAG 能力 / 项目表达）">
+                <input type="text" id="summary-resource-focus" placeholder="资源偏好（选填，如：系统设计 / Agent / RAG）">
+            </div>
+            <p class="drop-hint" style="margin-top: 10px;">系统会综合当前会话中的 JD、简历分析和模拟面试记录，输出总评分、能力雷达图、改进建议与推荐资源。</p>
+            <button id="btn-start-summary" class="btn-primary btn-summary-primary">✨ 生成综合评估</button>
         </div>
     </div>
 
